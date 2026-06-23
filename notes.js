@@ -1,0 +1,331 @@
+// notes.js — Obsidian-like notes: CRUD, wikilinks, editable editor.
+// Notes are typed nodes (subject/topic/subtopic/note) arranged in a
+// hierarchy via parent_id; the sidebar renders that tree, and the editor
+// lets you reclassify a node's type/parent at any time.
+import {
+  getNotes, getNote, getNoteLinks, getNoteByTitle,
+  createNote, updateNote, deleteNote,
+  getChildren, getDescendants, validParentTypesFor, migrateNotesToHierarchy,
+} from './storage.js';import { el, $, $$, clear, renderMarkdownish, formatDate, toast, openContextMenu, contextMenuItems } from './ui.js';
+
+let activeId = null;
+let saveTimer = null;
+let openTabs = [];
+let modeSwitchCb = null;
+
+const TYPE_BADGE = { subject: 'SUB', topic: 'TOP', subtopic: 'SUBT', note: 'N' };
+
+// Called by app.js so that opening a note (from the Vault list, a
+// wikilink, or the Graph) always brings the Notes panel into view, even
+// though Notes is no longer its own top-level mode button.
+export function setModeSwitchCallback(fn) { modeSwitchCb = fn; }
+
+export async function initNotes() {
+  // One-time (idempotent) upgrade of any flat/legacy notes into a real
+  // Subject > ... > Note hierarchy based on their old `subject` field.
+  await migrateNotesToHierarchy();
+
+  activeId = getNotes()[0]?.id || null;
+  if (activeId) openTab(activeId);
+  renderList();
+  renderProgress();
+
+  $('#editor-content').addEventListener('input', onEditorInput);
+  $('#editor-content').addEventListener('click', onEditorClick);
+  $('#editor-tabs').addEventListener('click', onTabsClick);
+  $$('.tab-close').forEach(x => x.addEventListener('click', e => { e.stopPropagation(); }));
+}
+
+export function activeNoteId() { return activeId; }
+export function getActiveNote() { return activeId ? getNote(activeId) : null; }
+export function getOpenTabs() { return openTabs.slice(); }
+
+export function renderList() {
+  const list = $('#note-list');
+  if (!list) return;
+  clear(list);
+  const renderNode = (n, depth) => {
+    const item = el('div', {
+      class: 'sb-item' + (n.id === activeId ? ' active' : ''),
+      style: { paddingLeft: (12 + depth * 14) + 'px' },
+      onclick: () => openTab(n.id),
+    }, [
+      el('div', { class: 'sb-item-dot', style: { background: n.color || '#6F00FF' } }),
+      el('span', { class: 'sb-item-type' }, TYPE_BADGE[n.type || 'note'] || 'N'),
+      el('span', {}, n.title || 'Untitled'),
+    ]);
+    item.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openContextMenu(contextMenuItems(`${n.title || 'Untitled'} · ${n.type || 'note'}`, [
+        { label: 'Open', onClick: () => openTab(n.id) },
+        { label: 'Rename', onClick: () => {
+          const v = prompt('Rename', n.title || '');
+          if (v && v.trim() && v.trim() !== n.title) { updateNote(n.id, { title: v.trim() }).then(renderList); }
+        } },
+        { label: 'Delete', danger: true, onClick: () => {
+          if (!confirm(`Delete "${n.title || 'Untitled'}"? Child nodes will be unlinked.`)) return;
+          deleteNote(n.id).then(() => {
+            closeTab(n.id);
+            const remaining = getNotes();
+            if (remaining.length) openTab(remaining[0].id);
+            else { activeId = null; }
+            renderList();
+          });
+        } },
+      ]), e.clientX, e.clientY);
+    });
+    list.appendChild(item);
+    for (const child of getChildren(n.id)) renderNode(child, depth + 1);
+  };
+  const subjects = getNotes().filter(n => (n.type || 'note') === 'subject')
+    .sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+  for (const s of subjects) renderNode(s, 0);
+  // Safety net: anything without a parent that isn't itself a Subject
+  // (shouldn't normally happen once migrateNotesToHierarchy has run).
+  const orphans = getNotes().filter(n => !n.parent_id && (n.type || 'note') !== 'subject');
+  for (const o of orphans) renderNode(o, 0);
+
+  $('#stat-notes').textContent = String(getNotes().length);
+  const linkCount = getNoteLinks().length;
+  const linkStat = $('.sb-stat:nth-child(2) .sb-stat-num');
+  if (linkStat) linkStat.textContent = String(linkCount);
+  renderProgress();
+}
+
+function renderProgress() {
+  // Per-subject % = unique linked notes / total notes in subject, capped.
+  const notes = getNotes();
+  const links = getNoteLinks();
+  const subjects = {};
+  for (const n of notes) {
+    const s = n.subject || 'General';
+    if (!subjects[s]) subjects[s] = { total: 0, linked: new Set() };
+    subjects[s].total++;
+  }
+  for (const l of links) {
+    const src = getNote(l.source);
+    if (src) {
+      const s = src.subject || 'General';
+      if (subjects[s]) subjects[s].linked.add(src.id);
+    }
+  }
+  const host = $('#subject-progress');
+  if (!host) return;
+  clear(host);
+  for (const [name, data] of Object.entries(subjects)) {
+    const pct = Math.min(100, Math.round((data.linked.size / Math.max(1, data.total)) * 100));
+    host.appendChild(el('div', { class: 'sb-progress' }, [
+      `${name}`,
+      el('div', { class: 'sb-prog-bar' }, el('div', { class: 'sb-prog-fill', style: { width: pct + '%' } })),
+    ]));
+  }
+}
+
+export function openTab(id) {
+  if (!id) return;
+  modeSwitchCb?.();
+  if (!openTabs.includes(id)) openTabs.push(id);
+  activeId = id;
+  renderTabs();
+  renderEditor();
+  renderList();
+}
+
+export function closeTab(id) {
+  openTabs = openTabs.filter(t => t !== id);
+  if (activeId === id) activeId = openTabs[openTabs.length - 1] || null;
+  renderTabs();
+  renderEditor();
+  renderList();
+}
+
+function renderTabs() {
+  const host = $('#editor-tabs');
+  clear(host);
+  for (const id of openTabs) {
+    const n = getNote(id);
+    if (!n) continue;
+    const isActive = id === activeId;
+    const tab = el('div', {
+      class: 'tab' + (isActive ? ' active' : ''),
+      onclick: () => { activeId = id; renderTabs(); renderEditor(); renderList(); },
+    }, [
+      el('div', { class: 'tab-dot', style: { background: n.color || '#6F00FF' } }),
+      el('span', {}, n.title || 'Untitled'),
+      el('span', {
+        class: 'tab-close',
+        onclick: (e) => { e.stopPropagation(); closeTab(id); },
+      }, '×'),
+    ]);
+    host.appendChild(tab);
+  }
+}
+
+// Candidates a node of `type` is allowed to be parented under, excluding
+// itself and its own descendants (no cycles).
+function validParentCandidates(type, excludeId) {
+  const wanted = validParentTypesFor(type);
+  if (!wanted.length) return [];
+  const blocked = new Set([excludeId, ...getDescendants(excludeId).map(d => d.id)]);
+  return getNotes().filter(n => wanted.includes(n.type || 'note') && !blocked.has(n.id));
+}
+
+function renderEditor() {
+  const display = $('#note-display');
+  clear(display);
+  if (!activeId) {
+    display.appendChild(el('div', { class: 'empty-state' }, 'Select a note or create a new one.'));
+    return;
+  }
+  const note = getNote(activeId);
+  if (!note) return;
+  const titleInput = el('div', {
+    class: 'note-title',
+    contenteditable: 'true',
+    oninput: (e) => scheduleSave({ title: e.target.textContent.trim() || 'Untitled' }),
+  }, note.title || 'Untitled');
+  const tags = (note.tags || []).map(t => el('span', { class: 'note-tag' }, '#' + t));
+
+  const typeSel = el('select', {
+    class: 'note-subject',
+    onchange: (e) => {
+      const newType = e.target.value;
+      // Changing type invalidates the old parent unless it's still valid.
+      const stillValid = validParentTypesFor(newType).includes(getNote(note.parent_id)?.type);
+      updateNote(note.id, { type: newType, parent_id: stillValid ? note.parent_id : null });
+      renderEditor(); renderList();
+    },
+  }, ['subject', 'topic', 'subtopic', 'note'].map(ty =>
+    el('option', { value: ty, ...(ty === (note.type || 'note') ? { selected: 'selected' } : {}) }, ty[0].toUpperCase() + ty.slice(1))));
+
+  const parentCandidates = validParentCandidates(note.type || 'note', note.id);
+  const parentSel = (note.type || 'note') === 'subject' ? null : el('select', {
+    class: 'note-subject',
+    onchange: async (e) => {
+      const pid = e.target.value || null;
+      const parent = pid ? getNote(pid) : null;
+      await updateNote(note.id, { parent_id: pid, subject: parent ? (parent.type === 'subject' ? parent.title : parent.subject) : note.subject });
+      renderEditor(); renderList();
+    },
+  }, [
+    el('option', { value: '' }, '— no parent —'),
+    ...parentCandidates.map(p => el('option', { value: p.id, ...(p.id === note.parent_id ? { selected: 'selected' } : {}) }, `[${p.type}] ${p.title}`)),
+  ]);
+
+  const colorSel = el('input', {
+    type: 'color',
+    class: 'note-color',
+    value: note.color || '#6F00FF',
+    onchange: (e) => { updateNote(note.id, { color: e.target.value }); renderList(); renderEditor(); toast('Color updated'); },
+  });
+  const addTagInput = el('input', {
+    class: 'add-tag-input',
+    placeholder: '+ tag',
+    onkeydown: (e) => {
+      if (e.key === 'Enter' && e.target.value.trim()) {
+        const t = e.target.value.trim().replace(/^#/, '');
+        const tags = [...(note.tags || []), t];
+        updateNote(note.id, { tags });
+        e.target.value = '';
+        renderEditor();
+      }
+    },
+  });
+  const removeTag = (i) => (e) => {
+    e.stopPropagation();
+    const tags = (note.tags || []).filter((_, j) => j !== i);
+    updateNote(note.id, { tags });
+    renderEditor();
+  };
+  tags.forEach((node, i) => node.addEventListener('click', removeTag(i)));
+
+  const metaChildren = [
+    el('span', {}, formatDate(note.updated_at || note.created_at)),
+    el('div', { class: 'note-tags-row' }, [...tags, addTagInput]),
+    typeSel,
+  ];
+  if (parentSel) metaChildren.push(parentSel);
+  metaChildren.push(colorSel);
+  const meta = el('div', { class: 'note-meta' }, metaChildren);
+
+  const body = el('textarea', {
+    class: 'note-body',
+    placeholder: 'Write your note. Use [[Title]] to link to another note.',
+  });
+  body.value = note.body || '';
+
+  const preview = el('div', { class: 'note-preview', html: renderMarkdownish(note.body || '') });
+
+  const deleteBtn = el('button', {
+    class: 'btn-danger',
+    onclick: async () => {
+      if (!confirm('Delete this note? Child nodes will be unlinked, not deleted.')) return;
+      await deleteNote(note.id);
+      closeTab(note.id);
+      const remaining = getNotes();
+      if (remaining.length) openTab(remaining[0].id);
+      else { activeId = null; renderEditor(); renderTabs(); }
+      renderList();
+    },
+  }, 'Delete');
+
+  const toolbar = el('div', { class: 'note-toolbar' }, [
+    el('button', {
+      class: 'btn-ghost',
+      onclick: () => { preview.innerHTML = renderMarkdownish(body.value); },
+    }, 'Refresh preview'),
+    deleteBtn,
+  ]);
+
+  display.append(titleInput, meta, body, toolbar, preview);
+}
+
+function scheduleSave(patch) {
+  if (!activeId) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    await updateNote(activeId, patch);
+    renderList();
+    if ('title' in patch) renderTabs();
+  }, 400);
+}
+
+function onEditorInput(e) {
+  const t = e.target;
+  if (t.classList.contains('note-title')) scheduleSave({ title: t.textContent.trim() || 'Untitled' });
+  if (t.classList.contains('note-body')) scheduleSave({ body: t.value });
+}
+
+function onEditorClick(e) {
+  const wl = e.target.closest('.wikilink');
+  if (!wl) return;
+  const title = wl.dataset.wikilink;
+  const target = getNoteByTitle(title);
+  if (target) openTab(target.id);
+  else {
+    (async () => {
+      const created = await createNote({ title, body: '' });
+      renderList();
+      openTab(created.id);
+      toast('Created new note: ' + title);
+    })();
+  }
+}
+
+function onTabsClick(e) {
+  const close = e.target.closest('.tab-close');
+  if (!close) return;
+  const tab = close.closest('.tab');
+  if (!tab) return;
+  // tab has no data attr in the dynamic render; use openTabs index by text
+  const idx = [...tab.parentElement.children].indexOf(tab);
+  const id = openTabs[idx];
+  if (id) closeTab(id);
+}
+
+export async function addNote() {
+  const note = await createNote({ title: 'New Note', body: '## New Note\n\nStart writing. Use [[Other Note]] to link.', subject: 'General' });
+  renderList();
+  openTab(note.id);
+}
