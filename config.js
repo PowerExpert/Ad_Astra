@@ -1,18 +1,14 @@
 // config.js — central place for credentials & runtime constants.
-// The user is hardcoding these later. Leave them empty for now;
-// storage.js will detect that and fall back to localStorage only.
 
 export const SUPABASE_CONFIG = {
-  // TODO: hardcode here — Supabase project URL, e.g. "https://abc.supabase.co"
   url: '',
-  // TODO: hardcode here — Supabase anon public key
   anonKey: '',
 };
 
 export const AI_CONFIG = {
-  apiKey: 'uE4O0MRUtxnw1xlr1BcbCRldAQFHoL4aD4VFTkl1',
-  model: 'command-r-plus-08-2024',
-  endpoint: 'https://api.cohere.com/v2/chat',
+  apiKey: 'AQ.Ab8RN6K9XGiBspsH1MWmFuWDFzxnByIn9-znqm0ZjSPBiT64Cw',
+  endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+  model: 'gemini-2.5-flash',
 };
 
 export const APP_CONFIG = {

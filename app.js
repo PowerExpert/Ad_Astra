@@ -215,19 +215,57 @@ function bindAddNote() {
 }
 
 function bindAiPanel() {
+  // Conversation history so follow-up questions work correctly
+  const history = [];
+
   const send = async () => {
     const input = $('#ai-input-field');
     const text = input.value.trim();
     if (!text) return;
     input.value = '';
+    input.disabled = true;
+    $('#ai-send-btn').disabled = true;
+
     pushAiMsg('user', text);
-    const typing = pushTyping();
-    const r = await aiChat([{ role: 'user', content: text }]);
-    typing.remove();
-    pushAiMsg('assistant', r.content, r.error ? { type: 'error' } : null);
+    history.push({ role: 'user', content: text });
+
+    if (!AI_CONFIG.apiKey) {
+      // No key → heuristic, no streaming
+      const typing = pushTyping();
+      const r = await aiChat(history);
+      typing.remove();
+      pushAiMsg('assistant', r.content, r.error ? { type: 'error' } : null);
+      history.push({ role: 'assistant', content: r.content });
+    } else {
+      // Real model → stream tokens into a live bubble
+      const bubble = pushAiMsg('assistant', '');
+      const textNode = document.createTextNode('');
+      bubble.appendChild(textNode);
+      let full = '';
+
+      const r = await aiChat(history, {
+        onToken: (chunk) => {
+          full += chunk;
+          textNode.textContent = full;
+          const host = $('#ai-messages');
+          if (host) host.scrollTop = host.scrollHeight;
+        },
+      });
+
+      if (r.error) {
+        textNode.textContent = r.content;
+        bubble.classList.add('ai-error');
+      }
+      history.push({ role: 'assistant', content: r.content });
+    }
+
+    input.disabled = false;
+    $('#ai-send-btn').disabled = false;
+    input.focus();
   };
+
   $('#ai-send-btn')?.addEventListener('click', send);
-  $('#ai-input-field')?.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  $('#ai-input-field')?.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 }
 
 function pushAiMsg(role, text, opts = {}) {
