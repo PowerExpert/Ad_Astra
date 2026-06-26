@@ -59,6 +59,12 @@ let outlinePlacement  = null;  // null | {} | { x1, y1 }
 // Connect mode
 let connectSourceId   = null;
 
+// Hover tooltip
+let hoveredNodeId  = null;
+let hoverTimer     = null;
+let hoverGrace     = null;
+let tooltipEl      = null;
+
 // Live world-space mouse position (updated on every mousemove)
 let mouseWorld = { x: -9999, y: -9999 };
 
@@ -98,7 +104,6 @@ export function startGraph() {
   syncCanvasSize(canvas, container);
   rebuildPositions(canvas.width, canvas.height);
   bindInteraction(canvas);
-  ensureHint(container);
   bindResize(canvas, container);
   if (animFrame) cancelAnimationFrame(animFrame);
   t = 0;
@@ -280,6 +285,8 @@ export function startGraph() {
 export function stopGraph() {
   if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
   if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
+  clearTimeout(hoverTimer); clearTimeout(hoverGrace);
+  hideTooltip(); hoveredNodeId = null;
   cancelConnectMode();
   cancelOutlinePlacement();
 }
@@ -418,6 +425,12 @@ function bindInteraction(canvas) {
     const { x: wx, y: wy } = toWorld(sx, sy);
     const nodes = currentNodes();
 
+    // Hide any visible tooltip the moment the user starts interacting
+    clearTimeout(hoverTimer);
+    clearTimeout(hoverGrace);
+    hideTooltip();
+    hoveredNodeId = null;
+
     // ── Outline placement (two-click flow) ──────────────────
     if (outlinePlacement) {
       if (outlinePlacement.x1 === undefined) {
@@ -498,6 +511,38 @@ function bindInteraction(canvas) {
       outlineDragLive.dx = w.x - outlineDragStart.x;
       outlineDragLive.dy = w.y - outlineDragStart.y;
     }
+
+    // ── Hover tooltip ─────────────────────────────────────────
+    // Skip while any drag is active — tooltip would just flicker.
+    if (!panDragging && !draggedNodeId && !draggedTitleId && !draggedOutlineId) {
+      const hoverHit = currentNodes().find(n => Math.hypot(n.x - w.x, n.y - w.y) < hitRadius(n));
+      if (hoverHit) {
+        clearTimeout(hoverGrace);
+        hoverGrace = null;
+        if (hoverHit.id !== hoveredNodeId) {
+          clearTimeout(hoverTimer);
+          hideTooltip();
+          hoveredNodeId = hoverHit.id;
+          // Capture screen coords at the moment we arm the timer
+          const capSx = sx, capSy = sy;
+          hoverTimer = setTimeout(() => {
+            const note = getNote(hoveredNodeId);
+            if (note) showNodeTooltip(note, capSx, capSy, rect);
+          }, 500);
+        }
+      } else {
+        // Mouse left all nodes — short grace period before hiding so a tiny
+        // jitter while reading the tooltip doesn't immediately dismiss it.
+        if (hoveredNodeId && !hoverGrace) {
+          hoverGrace = setTimeout(() => {
+            hoveredNodeId = null;
+            clearTimeout(hoverTimer);
+            hideTooltip();
+            hoverGrace = null;
+          }, 250);
+        }
+      }
+    }
   });
 
   window.addEventListener('mouseup', (e) => {
@@ -557,6 +602,74 @@ function ensureHint(container) {
   if (old) old.remove();
   container.appendChild(el('div', { class: 'graph-hint' },
     'Scroll to zoom · drag empty space to pan · right-click to add nodes, titles, or outlines'));
+}
+
+// ── Node hover tooltip ────────────────────────────────────────
+const TYPE_LABEL = { subject: 'SUBJECT', topic: 'TOPIC', subtopic: 'SUBTOPIC', note: 'NOTE' };
+
+function stripMarkdown(text) {
+  return (text || '')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[\[([^\]]+)\]\]/g, '$1')
+    .replace(/^[-*]\s+/gm, '• ')
+    .replace(/^>\s+/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function showNodeTooltip(note, sx, sy, canvasRect) {
+  hideTooltip();
+
+  const preview = stripMarkdown(note.body).slice(0, 280);
+  const tags    = (note.tags || []).slice(0, 5);
+  const links   = getNoteLinks().filter(l => l.source === note.id || l.target === note.id).length;
+  const kids    = getChildren(note.id).length;
+
+  const tagEls = tags.map(t => el('span', { class: 'node-tooltip-tag' }, '#' + t));
+
+  const parts = [
+    el('div', { class: 'node-tooltip-header' }, [
+      el('div', { class: 'node-tooltip-dot', style: { background: note.color || '#6F00FF' } }),
+      el('span', { class: 'node-tooltip-title' }, note.title || 'Untitled'),
+      el('span', { class: 'node-tooltip-type' }, TYPE_LABEL[note.type || 'note'] || 'NOTE'),
+    ]),
+    el('div', { class: 'node-tooltip-meta' }, [
+      el('span', {}, note.subject || 'General'),
+      (links || kids) ? el('span', { class: 'node-tooltip-counts' },
+        [kids ? `${kids} child${kids === 1 ? '' : 'ren'}` : '', links ? `${links} link${links === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ')
+      ) : null,
+    ].filter(Boolean)),
+  ];
+
+  if (tags.length) parts.push(el('div', { class: 'node-tooltip-tags' }, tagEls));
+
+  if (preview) parts.push(el('div', { class: 'node-tooltip-body' }, preview + (note.body && note.body.length > 280 ? '…' : '')));
+
+  tooltipEl = el('div', { class: 'node-tooltip' }, parts);
+  document.body.appendChild(tooltipEl);
+
+  // Position: prefer right of cursor, fall back to left; prefer below, fall back to above.
+  const TW = 290, TH = tooltipEl.offsetHeight || 160, MARGIN = 12;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const absX = canvasRect.left + sx, absY = canvasRect.top + sy;
+  let left = absX + MARGIN;
+  let top  = absY + MARGIN;
+  if (left + TW > vw - MARGIN) left = absX - TW - MARGIN;
+  if (top  + TH > vh - MARGIN) top  = absY - TH - MARGIN;
+  tooltipEl.style.left = Math.max(MARGIN, left) + 'px';
+  tooltipEl.style.top  = Math.max(MARGIN, top)  + 'px';
+
+  // Fade in
+  requestAnimationFrame(() => tooltipEl?.classList.add('visible'));
+}
+
+function hideTooltip() {
+  if (!tooltipEl) return;
+  tooltipEl.remove();
+  tooltipEl = null;
 }
 
 // ── Connect mode ──────────────────────────────────────────────

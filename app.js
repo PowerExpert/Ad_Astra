@@ -51,6 +51,20 @@ async function bootstrap() {
   bindAuthButtons();
   bindAddNote();
   initSearch(openTab);
+
+  // Let any module pre-fill the AI input (e.g. "Chat about this note" button).
+  // Sets the value, scrolls the AI panel into view, and focuses the input
+  // so the user can edit before sending.
+  window.__prefillAiChat = (text) => {
+    const input = $('#ai-input-field');
+    if (!input) return;
+    input.value = text;
+    input.focus();
+    // Scroll the AI panel messages to bottom so context is visible
+    const msgs = $('#ai-messages');
+    if (msgs) msgs.scrollTop = msgs.scrollHeight;
+  };
+
   applySettingsToUi(getSettings());
   showBannerIfNeeded();
   applyLayout();
@@ -60,7 +74,7 @@ async function bootstrap() {
   }
 
   // Initial AI greeting
-  pushAiMsg('assistant', `Welcome to NexusLearn. ${isLocalMode() ? 'Running in local mode — set Supabase and AI keys in config.js to sync and unlock real AI.' : `Signed in as ${user.email}.`} Try creating a note and linking with [[Another Note]].`, { type: 'insight' });
+  pushAiMsg('assistant', `Welcome to Ad Astra. ${isLocalMode() ? 'Running in local mode — set Supabase and AI keys in config.js to enable sync and real AI.' : `Signed in as ${user.email}.`}`, { type: 'insight' });
 }
 
 function setAvatar(user) {
@@ -165,6 +179,19 @@ function bindSettings() {
   tog('tog-quiz', v => updateSettings({ aiOpts: { ...getSettings().aiOpts, showQuiz: v } }));
   tog('tog-exam', v => updateSettings({ aiOpts: { ...getSettings().aiOpts, examCountdown: v } }));
 
+  // Light mode toggle — persisted to localStorage independently of Supabase settings
+  const lightToggle = $('#tog-light');
+  if (lightToggle) {
+    const applyTheme = (light) => {
+      document.documentElement.classList.toggle('light', light);
+      lightToggle.classList.toggle('on', light);
+      localStorage.setItem('adastra.theme', light ? 'light' : 'dark');
+    };
+    // Restore from last session
+    applyTheme(localStorage.getItem('adastra.theme') === 'light');
+    lightToggle.addEventListener('click', () => applyTheme(!document.documentElement.classList.contains('light')));
+  }
+
   $('#graph-node-size')?.addEventListener('input', e => { const v = parseInt(e.target.value, 10); setOpts({ nodeSize: v }); updateSettings({ graphOpts: { ...getSettings().graphOpts, nodeSize: v } }); startGraph(); });
   $('#graph-link-strength')?.addEventListener('input', e => { const v = parseInt(e.target.value, 10); setOpts({ linkStrength: v }); updateSettings({ graphOpts: { ...getSettings().graphOpts, linkStrength: v } }); startGraph(); });
 
@@ -193,10 +220,6 @@ function applySettingsToUi(s) {
   t('tog-auto', s.aiOpts?.autoAnalyze);
   t('tog-quiz', s.aiOpts?.showQuiz);
   t('tog-exam', s.aiOpts?.examCountdown);
-  t('addon-pomodoro', s.addons?.pomodoro);
-  t('addon-sr', s.addons?.spacedRep);
-  t('addon-exam', s.addons?.examSim);
-  t('addon-mm', s.addons?.mindMap);
 }
 
 function updateExamCountdown() {
@@ -333,7 +356,7 @@ function renderAuthModal(visible) {
     }, [
       el('div', { class: 'modal' }, [
         el('div', { class: 'modal-title-row' }, [
-          el('div', { class: 'modal-title' }, 'Sign in to NexusLearn'),
+          el('div', { class: 'modal-title' }, 'Sign in to Ad Astra'),
           closeBtn,
         ]),
         el('div', { class: 'modal-sub' }, 'Your notes and progress sync across devices.'),

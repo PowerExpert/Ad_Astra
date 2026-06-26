@@ -1,11 +1,15 @@
-// ai.js — AI assistant using Gemini via the OpenAI-compatible endpoint.
+// ai.js — AI assistant using the native Gemini REST API.
 // Falls back to a heuristic path when no API key is configured.
 // Both paths are grounded in the user's note hierarchy (Subject > Topic > Subtopic > Note).
 //
-// Endpoint:  https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
-// Auth:      Authorization: Bearer YOUR_GEMINI_API_KEY
-// Response:  standard OpenAI shape — data.choices[0].message.content
-//            or Server-Sent Events when streaming=true
+// Uses the native Gemini endpoint (not the OpenAI-compatible path) because
+// new AQ. prefix keys issued by Google AI Studio fail on the OpenAI-compat
+// endpoint with 401 "Multiple authentication credentials received".
+//
+// Endpoint:  https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+// Auth:      ?key=YOUR_GEMINI_API_KEY  (query param — works with both AIza and AQ. keys)
+// Request:   { system_instruction, contents: [{role, parts:[{text}]}], generationConfig }
+// Response:  candidates[0].content.parts[0].text
 import { AI_CONFIG } from './config.js';
 import {
   getNotes, getNote, getNoteLinks, getSettings,
@@ -14,53 +18,56 @@ import {
 import { daysUntil } from './ui.js';
 import { getActiveNote } from './notes.js';
 
-const SYSTEM_PROMPT = `You are Nexus AI, a study assistant inside a personal knowledge app called NexusLearn.
+const SYSTEM_PROMPT = `You are Nexus AI, a study assistant inside a personal knowledge app called Ad Astra.
 Be concise, practical, and grounded in the user's notes.
 The user's notes are organised as a hierarchy: Subject > Topic > Subtopic > Note.
 When the user asks about a topic, reference their own notes if relevant — including small details, not just headline facts.
 Prefer short paragraphs and bullet points. Don't repeat the user's question.`;
 
 // ── Core chat call ────────────────────────────────────────────
-// `onToken` is an optional callback called with each streamed text chunk.
-// When provided the call streams; otherwise it waits for the full response.
+// `messages` is [{role:'user'|'assistant', content:'...'}].
+// `opts.onToken(chunk)` enables streaming — tokens appear as they arrive.
 export async function aiChat(messages, opts = {}) {
   if (!AI_CONFIG.apiKey) return heuristicReply(messages);
 
-  const grounded = groundingBlock();
-  const full = [
-    { role: 'system', content: SYSTEM_PROMPT + (grounded ? '\n\n' + grounded : '') },
-    ...messages,
-  ];
-
+  const grounded  = groundingBlock();
+  const sysText   = SYSTEM_PROMPT + (grounded ? '\n\n' + grounded : '');
   const streaming = typeof opts.onToken === 'function';
 
+  // Native Gemini format: roles are 'user' | 'model' (not 'assistant')
+  const contents = messages.map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
+
+  const body = {
+    system_instruction: { parts: [{ text: sysText }] },
+    contents,
+    generationConfig: {
+      temperature:     opts.temperature ?? 0.4,
+      maxOutputTokens: opts.maxTokens   ?? 800,
+    },
+  };
+
+  const action = streaming ? 'streamGenerateContent' : 'generateContent';
+  const url    = `${AI_CONFIG.endpoint}/${AI_CONFIG.model}:${action}?key=${AI_CONFIG.apiKey}${streaming ? '&alt=sse' : ''}`;
+
   try {
-    const res = await fetch(AI_CONFIG.endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${AI_CONFIG.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: AI_CONFIG.model,
-        messages: full,
-        temperature: opts.temperature ?? 0.4,
-        max_tokens: opts.maxTokens ?? 800,
-        stream: streaming,
-      }),
+    const res = await fetch(url, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
     });
 
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
-      return { role: 'assistant', content: `AI error: ${res.status} ${errText.slice(0, 160)}`, error: true };
+      return { role: 'assistant', content: `AI error: ${res.status} ${errText.slice(0, 200)}`, error: true };
     }
 
-    if (streaming) {
-      return await readStream(res, opts.onToken);
-    }
+    if (streaming) return await readGeminiStream(res, opts.onToken);
 
-    const data = await res.json();
-    const content = data.choices?.[0]?.message?.content || '(no response)';
+    const data    = await res.json();
+    const content = data.candidates?.[0]?.content?.parts?.[0]?.text || '(no response)';
     return { role: 'assistant', content };
 
   } catch (err) {
@@ -68,35 +75,32 @@ export async function aiChat(messages, opts = {}) {
   }
 }
 
-// Reads an SSE stream from Gemini/OpenAI-compatible endpoint.
-// Calls onToken(chunk) for each text delta, returns the full assembled reply.
-async function readStream(res, onToken) {
-  const reader = res.body.getReader();
+// Reads Gemini's SSE stream. Each event is a JSON object with the same
+// candidates[0].content.parts[0].text shape as the non-streaming response.
+async function readGeminiStream(res, onToken) {
+  const reader  = res.body.getReader();
   const decoder = new TextDecoder();
   let full = '';
-  let buf = '';
+  let buf  = '';
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
 
-    // SSE lines look like: "data: {...}\n\n"
     const lines = buf.split('\n');
-    buf = lines.pop() ?? ''; // keep the incomplete last line in the buffer
+    buf = lines.pop() ?? '';
 
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed.startsWith('data:')) continue;
       const payload = trimmed.slice(5).trim();
-      if (payload === '[DONE]') continue;
+      if (!payload || payload === '[DONE]') continue;
       try {
         const chunk = JSON.parse(payload);
-        const delta = chunk.choices?.[0]?.delta?.content;
+        const delta = chunk.candidates?.[0]?.content?.parts?.[0]?.text;
         if (delta) { full += delta; onToken(delta); }
-      } catch {
-        // malformed chunk — skip
-      }
+      } catch { /* malformed chunk — skip */ }
     }
   }
 

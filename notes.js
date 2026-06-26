@@ -275,6 +275,14 @@ function renderEditor() {
       class: 'btn-ghost',
       onclick: () => { preview.innerHTML = renderMarkdownish(body.value); },
     }, 'Refresh preview'),
+    el('button', {
+      class: 'btn-ghost btn-ai-chat',
+      onclick: () => {
+        const bodySnippet = (note.body || '').slice(0, 600);
+        const prompt = `Let's discuss my "${note.title}" note (${note.type || 'note'} in ${note.subject || 'General'}).\n\nHere's what I have:\n\n${bodySnippet}${note.body && note.body.length > 600 ? '\n…' : ''}\n\nWhat questions should I be able to answer about this? What am I missing?`;
+        window.__prefillAiChat?.(prompt);
+      },
+    }, '✦ Chat about this'),
     deleteBtn,
   ]);
 

@@ -62,7 +62,7 @@ html, body {
   align-items: center;
   gap: 8px;
   padding: 0 16px;
-  height: 44px;
+  height: 52px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -97,7 +97,22 @@ html, body {
 
 .tb-spacer { flex: 1; }
 
-.tb-mode-group { display: flex; gap: 4px; }
+.tb-mode-group {
+  display: flex;
+  gap: 0;
+  align-self: stretch;
+  align-items: stretch;
+  margin: 0 2px;
+}
+
+.tb-mode-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  align-self: center;
+  margin: 0 6px;
+  flex-shrink: 0;
+}
 
 .tb-btn {
   display: flex;
@@ -1097,15 +1112,37 @@ html, body {
 .flashcard-front { font-size: 13px; color: var(--white); font-weight: 600; }
 .flashcard-review { display: flex; gap: 5px; margin-top: 6px; }
 
-/* Mode buttons (Notes / Graph / Materials / Tests / Flashcards) */
+/* Mode buttons — full-height tabs with bottom-border active indicator */
 .mode-btn {
-  display: flex; align-items: center; gap: 5px; padding: 5px 10px;
-  border: 1px solid var(--border); border-radius: 6px; background: transparent;
-  color: var(--text-muted); font-size: 12px; cursor: pointer;
-  font-family: 'Inter', sans-serif; transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  cursor: pointer;
+  font-family: 'Inter', sans-serif;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.mode-btn:hover { border-color: var(--border-hover); color: var(--text); }
-.mode-btn.active { background: var(--violet-glow); border-color: var(--violet); color: var(--violet-bright); }
+.mode-btn:hover {
+  color: var(--text);
+  background: rgba(111, 0, 255, 0.05);
+}
+.mode-btn.active {
+  border-bottom-color: var(--violet);
+  color: var(--violet-bright);
+  background: var(--violet-glow);
+}
+.mode-btn[data-group="primary"] {
+  font-weight: 500;
+  font-size: 13px;
+}
 
 /* Auth modal */
 .modal-backdrop {
@@ -1393,3 +1430,162 @@ html, body {
   font-size: 13px;
   color: var(--text-dim);
 }
+
+/* ========================
+   NODE HOVER TOOLTIP
+   ======================== */
+.node-tooltip {
+  position: fixed;
+  z-index: 700;
+  width: 290px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.55), 0 0 0 1px rgba(111,0,255,0.12);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.node-tooltip.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.node-tooltip-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.node-tooltip-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.node-tooltip-title {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--white);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.node-tooltip-type {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--violet-bright);
+  background: var(--violet-glow);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+
+.node-tooltip-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.node-tooltip-counts {
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+.node-tooltip-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.node-tooltip-tag {
+  font-size: 10px;
+  color: var(--violet-bright);
+  background: var(--violet-glow);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+
+.node-tooltip-body {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  border-top: 1px solid var(--border);
+  padding-top: 7px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: hidden;
+}
+
+/* ========================
+   CHAT ABOUT THIS BUTTON
+   ======================== */
+.btn-ai-chat {
+  color: var(--violet-bright);
+  border-color: var(--border);
+}
+.btn-ai-chat:hover {
+  background: var(--violet-glow);
+  border-color: var(--violet);
+  color: var(--violet-bright);
+}
+
+/* ========================
+   LIGHT MODE
+   ======================== */
+html.light {
+  --void:         #F2F0FA;
+  --surface:      #FFFFFF;
+  --panel:        #F8F7FD;
+  --card:         #EDEAF8;
+  --border:       rgba(111, 0, 255, 0.15);
+  --border-hover: rgba(111, 0, 255, 0.4);
+  --violet-glow:  rgba(111, 0, 255, 0.07);
+  --white:        #1A1528;
+  --white-dim:    rgba(26, 21, 40, 0.75);
+  --white-muted:  rgba(26, 21, 40, 0.45);
+  --text:         #1A1528;
+  --text-muted:   rgba(26, 21, 40, 0.65);
+  --text-dim:     rgba(26, 21, 40, 0.4);
+  --success:      #16A34A;
+  --warn:         #D97706;
+}
+
+/* Graph canvas always stays dark — it's a purpose-built canvas tool */
+html.light #graph-view { background: #0D0D18; }
+
+/* Scrollbars in light mode */
+html.light ::-webkit-scrollbar-thumb { background: rgba(111,0,255,0.2); }
+
+/* Note body border in light mode */
+html.light .note-body { border-color: rgba(111,0,255,0.15); }
+html.light .note-body:focus { border-color: var(--violet); }
+
+/* Modal backdrop in light mode */
+html.light .modal-backdrop { background: rgba(0,0,0,0.35); }
+
+/* Search overlay in light mode */
+html.light .search-overlay { background: rgba(0,0,0,0.3); }
+
+/* Context menus in light mode */
+html.light .ctx-menu { box-shadow: 0 8px 24px rgba(0,0,0,0.12); }
+
+/* Tooltips in light mode */
+html.light .node-tooltip { box-shadow: 0 16px 48px rgba(0,0,0,0.15); }
+
+/* AI panel orb pulse stays vivid */
+html.light .ai-subtitle { color: #16A34A; }
+
+/* Topbar hover tint */
+html.light .mode-btn:hover { background: rgba(111,0,255,0.06); }
+html.light .tb-btn:hover { border-color: rgba(111,0,255,0.4); color: var(--text); }
