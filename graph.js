@@ -69,8 +69,24 @@ let draggedLineId     = null;
 let lineDragStart     = null;
 let lineDragLive      = null;  // { dx, dy }
 
+// ── Multi-select state ────────────────────────────────────────
+// Selection holds node IDs and graph object IDs
+let selection         = new Set();   // Set of IDs (nodes + graph objects)
+// Rubber-band rectangle drawn while LMB is held on empty space
+let rubberBand        = null;   // null | { sx, sy, wx, wy } — start in both spaces
+let rubberBandLive    = null;   // null | { x1,y1,x2,y2 } in world space (updated each mousemove)
+// Group drag: when dragging any selected item all others follow
+let groupDragging     = false;
+let groupDragStart    = null;   // { wx, wy }
+let groupDragLive     = null;   // { dx, dy }
+// Snapshot of positions/coords at drag start (so we compute clean deltas)
+let groupDragSnapshot = null;   // { [id]: {x,y} | {x1,y1,x2,y2} }
+
 // Connect mode
 let connectSourceId   = null;
+
+// Space bar held for pan
+let spaceHeld         = false;
 
 // Hover tooltip
 let hoveredNodeId  = null;
@@ -190,7 +206,14 @@ export function startGraph() {
     const STICKY_W = 160, STICKY_H = 100, STICKY_PAD = 10;
     const stickies = currentStickies();
     for (const s of stickies) {
-      const live = (draggedStickyId === s.id && stickyDragLive) ? stickyDragLive : s;
+      let livePt = s;
+      if (groupDragging && groupDragLive && selection.has(s.id)) {
+        const snap = groupDragSnapshot?.[s.id];
+        if (snap && snap.kind === 'obj-xy') livePt = { x: snap.x + groupDragLive.dx, y: snap.y + groupDragLive.dy };
+      } else if (draggedStickyId === s.id && stickyDragLive) {
+        livePt = stickyDragLive;
+      }
+      const live = livePt;
       const sx = live.x, sy = live.y;
       const bg = s.color || '#FBBF24';
       // Shadow
@@ -277,10 +300,34 @@ export function startGraph() {
     // ── 5. Nodes ─────────────────────────────────────────────────
     for (const n of nodes) {
       const r = nodeRadius(n);
+      const isSelected = selection.has(n.id);
+
+      // Selection spinning halo — drawn before the node body
+      if (isSelected) {
+        const haloR = r + 7 / zoom;
+        const dashLen = 5 / zoom, gapLen = 3 / zoom;
+        // Rotate the dash offset over time for the spinning effect
+        const dashOffset = -(t * 28) / zoom;
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, haloR, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(169,102,255,0.95)';
+        ctx.lineWidth   = 2 / zoom;
+        ctx.setLineDash([dashLen, gapLen]);
+        ctx.lineDashOffset = dashOffset;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.lineDashOffset = 0;
+        // Soft fill tint
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, haloR, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(111,0,255,0.10)';
+        ctx.fill();
+      }
+
       ctx.beginPath();
       drawNodeShape(ctx, n, r + 2 / zoom);
-      ctx.strokeStyle = n.id === connectSourceId ? 'rgba(139,127,238,0.9)' : 'rgba(255,255,255,0.18)';
-      ctx.lineWidth   = (n.id === connectSourceId ? 2 : 1) / zoom;
+      ctx.strokeStyle = n.id === connectSourceId ? 'rgba(139,127,238,0.9)' : isSelected ? 'rgba(169,102,255,0.8)' : 'rgba(255,255,255,0.18)';
+      ctx.lineWidth   = (n.id === connectSourceId || isSelected ? 2 : 1) / zoom;
       ctx.stroke();
       ctx.beginPath();
       drawNodeShape(ctx, n, r);
@@ -300,16 +347,40 @@ export function startGraph() {
       }
     }
 
+    // ── 5b. Selection halos for graph objects ─────────────────────
+    // Titles
+    for (const ti of currentTitles()) {
+      if (!selection.has(ti.id)) continue;
+      const live = (draggedTitleId === ti.id && titleDragLive) ? titleDragLive : ti;
+      const b = titleBounds(live);
+      const pad = 8 / zoom;
+      const dashOffset = -(t * 28) / zoom;
+      ctx.strokeStyle = 'rgba(169,102,255,0.95)';
+      ctx.lineWidth   = 2 / zoom;
+      ctx.setLineDash([5 / zoom, 3 / zoom]);
+      ctx.lineDashOffset = dashOffset;
+      ctx.strokeRect(b.x - pad, b.y - pad, b.w + pad * 2, b.h + pad * 2);
+      ctx.setLineDash([]);
+      ctx.lineDashOffset = 0;
+    }
+
     // ── 6. Titles (drawn on top) ──────────────────────────────────
     const titles = currentTitles();
     for (const ti of titles) {
-      const live = (draggedTitleId === ti.id && titleDragLive) ? titleDragLive : ti;
+      // Live position: group drag overrides individual drag overrides stored
+      let lx = ti.x, ly = ti.y;
+      if (groupDragging && groupDragLive && selection.has(ti.id)) {
+        const snap = groupDragSnapshot?.[ti.id];
+        if (snap && snap.kind === 'obj-xy') { lx = snap.x + groupDragLive.dx; ly = snap.y + groupDragLive.dy; }
+      } else if (draggedTitleId === ti.id && titleDragLive) {
+        lx = titleDragLive.x; ly = titleDragLive.y;
+      }
       const size = TITLE_FONT_SIZE / zoom;
       ctx.font      = `700 ${size}px 'Space Grotesk', sans-serif`;
       ctx.fillStyle = ti.color || 'rgba(255,255,255,0.92)';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(ti.text || 'Untitled', live.x, live.y);
+      ctx.fillText(ti.text || 'Untitled', lx, ly);
     }
     ctx.textBaseline = 'alphabetic';
 
@@ -349,11 +420,27 @@ export function startGraph() {
       ctx.setLineDash([]);
     }
 
+    // ── 7b. Rubber-band selection rectangle ───────────────────────
+    if (rubberBandLive) {
+      const { x1, y1, x2, y2 } = rubberBandLive;
+      ctx.fillStyle   = 'rgba(111,0,255,0.08)';
+      ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
+      ctx.strokeStyle = 'rgba(169,102,255,0.9)';
+      ctx.lineWidth   = 1.5 / zoom;
+      ctx.setLineDash([5 / zoom, 3 / zoom]);
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      ctx.setLineDash([]);
+    }
+
     // Update cursor to give clear feedback about current interaction mode
     const canvas2 = $('#graph-canvas');
     if (canvas2) {
-      if (panDragging) canvas2.style.cursor = 'grabbing';
+      if (panDragging)   canvas2.style.cursor = 'grabbing';
+      else if (groupDragging) canvas2.style.cursor = 'grabbing';
+      else if (rubberBandLive)    canvas2.style.cursor = 'crosshair';
+      else if (spaceHeld) canvas2.style.cursor = 'grab';
       else if (connectSourceId || outlinePlacement || linePlacement) canvas2.style.cursor = 'crosshair';
+      else if (selection.size > 0) canvas2.style.cursor = 'default';
       else canvas2.style.cursor = 'default';
     }
 
@@ -369,6 +456,10 @@ export function stopGraph() {
   hideTooltip(); hoveredNodeId = null;
   cancelConnectMode();
   cancelOutlinePlacement();
+  cancelLinePlacement();
+  clearSelection();
+  rubberBand = null;
+  rubberBandLive = null;
 }
 
 // ── Node geometry ─────────────────────────────────────────────
@@ -557,18 +648,30 @@ function bindInteraction(canvas) {
       return;
     }
 
-    // ── Node drag ────────────────────────────────────────────
+    // ── Node hit ─────────────────────────────────────────────
     const nodeHit = nodes.find(n => Math.hypot(n.x - wx, n.y - wy) < hitRadius(n));
     if (nodeHit) {
+      // If this node is part of a selection → start a group drag
+      if (selection.has(nodeHit.id)) {
+        startGroupDrag(wx, wy);
+        return;
+      }
+      // Otherwise clear selection (unless Shift held to add to it)
+      if (!e.shiftKey) clearSelection();
       draggedNodeId    = nodeHit.id;
       nodeDragOffset   = { x: wx - nodeHit.x, y: wy - nodeHit.y };
       nodeClickInfo    = { wx, wy, id: nodeHit.id };
       return;
     }
 
-    // ── Title drag ───────────────────────────────────────────
+    // ── Title hit ────────────────────────────────────────────
     const titleHit = currentTitles().find(ti => pointInRect(wx, wy, titleBounds(ti)));
     if (titleHit) {
+      if (selection.has(titleHit.id)) {
+        startGroupDrag(wx, wy);
+        return;
+      }
+      if (!e.shiftKey) clearSelection();
       draggedTitleId   = titleHit.id;
       titleDragLive    = { x: titleHit.x, y: titleHit.y };
       titleDragOffset  = { x: wx - titleHit.x, y: wy - titleHit.y };
@@ -578,15 +681,21 @@ function bindInteraction(canvas) {
     // ── Outline drag (edge only) ─────────────────────────────
     const outlineHit = currentOutlines().find(o => outlineEdgeHit(wx, wy, o));
     if (outlineHit) {
+      if (!e.shiftKey) clearSelection();
       draggedOutlineId  = outlineHit.id;
       outlineDragStart  = { x: wx, y: wy };
       outlineDragLive   = { dx: 0, dy: 0 };
       return;
     }
 
-    // ── Sticky drag (full body hit) ──────────────────────────
+    // ── Sticky hit ───────────────────────────────────────────
     const stickyHit = currentStickies().find(s => pointInRect(wx, wy, stickyBounds(s)));
     if (stickyHit) {
+      if (selection.has(stickyHit.id)) {
+        startGroupDrag(wx, wy);
+        return;
+      }
+      if (!e.shiftKey) clearSelection();
       draggedStickyId  = stickyHit.id;
       stickyDragOffset = { x: wx - stickyHit.x, y: wy - stickyHit.y };
       stickyDragLive   = { x: stickyHit.x, y: stickyHit.y };
@@ -596,15 +705,23 @@ function bindInteraction(canvas) {
     // ── Line drag ─────────────────────────────────────────────
     const lineHit = currentLines().find(ln => lineHitTestObj(wx, wy, ln));
     if (lineHit) {
+      if (!e.shiftKey) clearSelection();
       draggedLineId  = lineHit.id;
       lineDragStart  = { x: wx, y: wy };
       lineDragLive   = { dx: 0, dy: 0 };
       return;
     }
 
-    // ── Pan drag (empty space) ───────────────────────────────
-    panDragging  = true;
-    panDragStart = { sx, sy, px: pan.x, py: pan.y };
+    // ── Empty space: rubber-band or pan ──────────────────────
+    if (spaceHeld) {
+      // Space held → pan
+      panDragging  = true;
+      panDragStart = { sx, sy, px: pan.x, py: pan.y };
+    } else {
+      clearSelection();
+      rubberBand     = { sx, sy, wx, wy };
+      rubberBandLive = null;
+    }
   });
 
   window.addEventListener('mousemove', (e) => {
@@ -620,6 +737,38 @@ function bindInteraction(canvas) {
       pan.x = panDragStart.px + (sx - panDragStart.sx);
       pan.y = panDragStart.py + (sy - panDragStart.sy);
     }
+
+    // ── Rubber-band update ────────────────────────────────────
+    if (rubberBand) {
+      const dx = sx - rubberBand.sx, dy = sy - rubberBand.sy;
+      const distScreen = Math.hypot(dx, dy);
+      if (distScreen > 5) {
+        // If space is held, treat as pan instead of rubber-band
+        if (spaceHeld) {
+          rubberBand = null;
+          rubberBandLive = null;
+          panDragging  = true;
+          panDragStart = { sx, sy: sy, px: pan.x, py: pan.y };
+        } else {
+          const bx1 = Math.min(rubberBand.wx, w.x), bx2 = Math.max(rubberBand.wx, w.x);
+          const by1 = Math.min(rubberBand.wy, w.y), by2 = Math.max(rubberBand.wy, w.y);
+          rubberBandLive = { x1: bx1, y1: by1, x2: bx2, y2: by2 };
+        }
+      }
+    }
+
+    // ── Group drag update ─────────────────────────────────────
+    if (groupDragging && groupDragStart) {
+      groupDragLive = { dx: w.x - groupDragStart.x, dy: w.y - groupDragStart.y };
+      // Apply live positions to nodes so they actually move in the frame
+      for (const id of selection) {
+        const snap = groupDragSnapshot?.[id];
+        if (!snap || snap.kind !== 'node') continue;
+        const p = positions[id];
+        if (p) { p.x = snap.x + groupDragLive.dx; p.y = snap.y + groupDragLive.dy; }
+      }
+    }
+
     if (draggedNodeId) {
       const p = positions[draggedNodeId];
       if (p) { p.x = w.x - nodeDragOffset.x; p.y = w.y - nodeDragOffset.y; }
@@ -643,7 +792,7 @@ function bindInteraction(canvas) {
 
     // ── Hover tooltip ─────────────────────────────────────────
     // Skip while any drag is active — tooltip would just flicker.
-    if (!panDragging && !draggedNodeId && !draggedTitleId && !draggedOutlineId) {
+    if (!panDragging && !draggedNodeId && !draggedTitleId && !draggedOutlineId && !rubberBand && !groupDragging) {
       const hoverHit = currentNodes().find(n => Math.hypot(n.x - w.x, n.y - w.y) < hitRadius(n));
       if (hoverHit) {
         clearTimeout(hoverGrace);
@@ -675,10 +824,28 @@ function bindInteraction(canvas) {
   });
 
   window.addEventListener('mouseup', (e) => {
+    // ── Rubber-band finalise ──────────────────────────────────
+    if (rubberBand) {
+      if (rubberBandLive) {
+        commitRubberBandSelection(rubberBandLive);
+      }
+      // else: tiny click on empty space — selection already cleared on mousedown
+      rubberBand     = null;
+      rubberBandLive = null;
+      return;
+    }
+
     if (panDragging) {
       panDragging = false;
       savePanZoom();
     }
+
+    // ── Group drag commit ─────────────────────────────────────
+    if (groupDragging) {
+      commitGroupDrag();
+      return;
+    }
+
     if (draggedNodeId) {
       const canvas2 = $('#graph-canvas');
       if (canvas2) {
@@ -686,7 +853,12 @@ function bindInteraction(canvas) {
         const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
         const w  = toWorld(sx, sy);
         if (nodeClickInfo && Math.hypot(w.x - nodeClickInfo.wx, w.y - nodeClickInfo.wy) < 6 / zoom) {
-          openNoteCallback?.(nodeClickInfo.id);
+          // It was a click: toggle selection with Shift, or open note
+          if (e.shiftKey) {
+            toggleSelect(nodeClickInfo.id);
+          } else {
+            openNoteCallback?.(nodeClickInfo.id);
+          }
         }
       }
       draggedNodeId = null;
@@ -726,6 +898,17 @@ function bindInteraction(canvas) {
     const { x: wx, y: wy } = toWorld(sx, sy);
     const nodes = currentNodes();
 
+    // If right-click is inside a multi-selection → show group context menu
+    if (selection.size > 1) {
+      const nodeHitSel = nodes.find(n => selection.has(n.id) && Math.hypot(n.x - wx, n.y - wy) < hitRadius(n));
+      const titleHitSel = currentTitles().find(ti => selection.has(ti.id) && pointInRect(wx, wy, titleBounds(ti)));
+      const stickyHitSel = currentStickies().find(s => selection.has(s.id) && pointInRect(wx, wy, stickyBounds(s)));
+      if (nodeHitSel || titleHitSel || stickyHitSel) {
+        showSelectionContextMenu(e.clientX, e.clientY);
+        return;
+      }
+    }
+
     const nodeHit    = nodes.find(n => Math.hypot(n.x - wx, n.y - wy) < hitRadius(n));
     if (nodeHit)    { showNodeContextMenu(nodeHit, e.clientX, e.clientY); return; }
     const titleHit   = currentTitles().find(ti => pointInRect(wx, wy, titleBounds(ti)));
@@ -740,13 +923,41 @@ function bindInteraction(canvas) {
     if (linkHit)    { showLinkContextMenu(linkHit, e.clientX, e.clientY); return; }
     showCanvasContextMenu(wx, wy, e.clientX, e.clientY);
   });
+
+  // ── Delete key removes selection ──────────────────────────
+  canvas.addEventListener('keydown', (e) => {
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selection.size > 0) {
+      e.preventDefault();
+      deleteSelection();
+    }
+    if (e.key === 'Escape') clearSelection();
+  });
+  // The canvas needs tabIndex to receive keydown
+  if (!canvas.hasAttribute('tabindex')) canvas.setAttribute('tabindex', '0');
+
+  // ── Space = pan mode (held while dragging empty space) ────
+  document.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && !e.target.matches('input,textarea,[contenteditable]')) {
+      e.preventDefault();
+      spaceHeld = true;
+      const c = $('#graph-canvas');
+      if (c && !rubberBand && !groupDragging) c.style.cursor = 'grab';
+    }
+  });
+  document.addEventListener('keyup', (e) => {
+    if (e.code === 'Space') {
+      spaceHeld = false;
+      const c = $('#graph-canvas');
+      if (c && panDragging) c.style.cursor = 'grabbing';
+    }
+  });
 }
 
 function ensureHint(container) {
   const old = container.querySelector('.graph-hint');
   if (old) old.remove();
   container.appendChild(el('div', { class: 'graph-hint' },
-    'Scroll to zoom · drag empty space to pan · right-click to add nodes, titles, or outlines'));
+    'Scroll to zoom · Space+drag to pan · drag empty space to select · right-click to add nodes'));
 }
 
 // ── Node hover tooltip ────────────────────────────────────────
@@ -862,6 +1073,134 @@ function cancelLinePlacement() {
   window.removeEventListener('keydown', onLineKey);
 }
 
+// ── Multi-select helpers ──────────────────────────────────────
+function clearSelection() {
+  selection.clear();
+}
+
+function toggleSelect(id) {
+  if (selection.has(id)) selection.delete(id);
+  else selection.add(id);
+}
+
+// After the rubber-band drag completes, select all objects inside the rect
+function commitRubberBandSelection(rect) {
+  const { x1, y1, x2, y2 } = rect;
+  const newSel = new Set();
+
+  // Nodes
+  for (const n of currentNodes()) {
+    if (n.x >= x1 && n.x <= x2 && n.y >= y1 && n.y <= y2) newSel.add(n.id);
+  }
+  // Titles
+  for (const ti of currentTitles()) {
+    if (ti.x >= x1 && ti.x <= x2 && ti.y >= y1 && ti.y <= y2) newSel.add(ti.id);
+  }
+  // Stickies
+  for (const s of currentStickies()) {
+    const cx = s.x + (STICKY_W / zoom) / 2, cy = s.y + (STICKY_H / zoom) / 2;
+    if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2) newSel.add(s.id);
+  }
+
+  if (newSel.size > 0) {
+    selection.clear();
+    for (const id of newSel) selection.add(id);
+    toast(`${selection.size} object${selection.size === 1 ? '' : 's'} selected — drag to move, Del to delete`);
+  }
+}
+
+// Build a snapshot of all selected objects' current positions for group drag
+function buildGroupDragSnapshot() {
+  const snap = {};
+  const noteIds = new Set(getNotes().map(n => n.id));
+  for (const id of selection) {
+    if (noteIds.has(id)) {
+      // It's a note node — use positions table
+      const p = positions[id];
+      if (p) snap[id] = { kind: 'node', x: p.x, y: p.y };
+    } else {
+      // It's a graph object (title/sticky/outline/line)
+      const obj = getGraphObjects().find(o => o.id === id);
+      if (!obj) continue;
+      if (obj.type === 'title' || obj.type === 'sticky') {
+        snap[id] = { kind: 'obj-xy', x: obj.x, y: obj.y };
+      } else if (obj.type === 'outline' || obj.type === 'line') {
+        snap[id] = { kind: 'obj-rect', x1: obj.x1, y1: obj.y1, x2: obj.x2, y2: obj.y2 };
+      }
+    }
+  }
+  return snap;
+}
+
+function startGroupDrag(wx, wy) {
+  groupDragging    = true;
+  groupDragStart   = { x: wx, y: wy };
+  groupDragLive    = { dx: 0, dy: 0 };
+  groupDragSnapshot = buildGroupDragSnapshot();
+}
+
+async function commitGroupDrag() {
+  if (!groupDragLive || !groupDragSnapshot) {
+    groupDragging = false; groupDragStart = null; groupDragLive = null; groupDragSnapshot = null;
+    return;
+  }
+  const { dx, dy } = groupDragLive;
+  if (Math.hypot(dx, dy) < 0.5) {
+    // Treat as click — clear selection
+    clearSelection();
+  } else {
+    // Persist all moves
+    const objUpdates = [];
+    for (const id of selection) {
+      const snap = groupDragSnapshot[id];
+      if (!snap) continue;
+      if (snap.kind === 'node') {
+        const p = positions[id];
+        if (p) { p.x = snap.x + dx; p.y = snap.y + dy; }
+      } else if (snap.kind === 'obj-xy') {
+        objUpdates.push(updateGraphObject(id, { x: snap.x + dx, y: snap.y + dy }));
+      } else if (snap.kind === 'obj-rect') {
+        objUpdates.push(updateGraphObject(id, { x1: snap.x1 + dx, y1: snap.y1 + dy, x2: snap.x2 + dx, y2: snap.y2 + dy }));
+      }
+    }
+    savePositions();
+    await Promise.all(objUpdates);
+  }
+  groupDragging = false;
+  groupDragStart = null;
+  groupDragLive = null;
+  groupDragSnapshot = null;
+}
+
+async function deleteSelection() {
+  if (!selection.size) return;
+  const count = selection.size;
+  if (!confirm(`Delete ${count} selected object${count === 1 ? '' : 's'}?`)) return;
+  const promises = [];
+  for (const id of selection) {
+    // Is it a note?
+    if (getNotes().find(n => n.id === id)) {
+      promises.push(deleteNote(id).then(() => { delete positions[id]; }));
+    } else {
+      // Graph object
+      promises.push(deleteGraphObject(id));
+    }
+  }
+  await Promise.all(promises);
+  clearSelection();
+  savePositions();
+  renderList();
+  toast(`Deleted ${count} object${count === 1 ? '' : 's'}`);
+}
+
+function showSelectionContextMenu(clientX, clientY) {
+  openContextMenu(contextMenuItems(`${selection.size} objects selected`, [
+    { label: 'Move together (drag any)', onClick: () => {} },
+    { label: 'Deselect all', onClick: () => clearSelection() },
+    { label: `Delete all ${selection.size}`, danger: true, onClick: () => deleteSelection() },
+  ]), clientX, clientY);
+}
+
 // ── Context menus ─────────────────────────────────────────────
 function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
@@ -923,6 +1262,8 @@ function showLineContextMenu(ln, clientX, clientY) {
     { label: 'Delete', danger: true, onClick: () => deleteGraphObject(ln.id) },
   ]), clientX, clientY);
 }
+
+function showTitleContextMenu(ti, clientX, clientY) {
   openContextMenu(contextMenuItems(ti.text || 'Title', [
     { label: 'Edit text', onClick: () => {
       const v = prompt('Title text', ti.text || '');
