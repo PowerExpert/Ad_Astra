@@ -294,7 +294,7 @@ function bindAiPanel() {
 function pushAiMsg(role, text, opts = {}) {
   const host = $('#ai-messages');
   const cls = role === 'user' ? 'ai-msg ai-msg-user' : (opts.type === 'insight' ? 'ai-msg ai-insight' : (opts.type === 'error' ? 'ai-msg ai-error' : 'ai-msg'));
-  const label = role === 'user' ? 'YOU' : (opts.type === 'insight' ? 'INSIGHT' : 'NEXUS AI');
+  const label = role === 'user' ? 'YOU' : (opts.type === 'insight' ? 'INSIGHT' : 'AD ASTRA AI');
   const div = el('div', { class: cls }, [
     el('div', { class: 'ai-msg-label' }, [el('div', { class: 'ai-msg-label-dot' }), label]),
     document.createTextNode(text),

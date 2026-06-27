@@ -37,6 +37,7 @@ function loadCache() {
       flashcards: [],
       settings: defaultSettings(),
     };
+    seedDemoData();
   }
   migrateCacheShape();
 }
@@ -50,6 +51,92 @@ function migrateCacheShape() {
     if (!NODE_TYPES.includes(n.type)) n.type = 'note';
     if (n.parent_id === undefined) n.parent_id = null;
   }
+}
+
+function seedDemoData() {
+  const now = () => new Date().toISOString();
+  const uid = APP_CONFIG.localUserId;
+  const id = () => crypto.randomUUID();
+
+  // IDs
+  const sPhysics  = id(), sMath    = id();
+  const tMechanics= id(), tCalc    = id(), tThermo = id();
+  const stNewton  = id(), stLimits = id();
+  const nNewton1  = id(), nNewton2 = id(), nLimits1= id(), nHeat   = id();
+  const linkId1   = id(), linkId2  = id();
+  const titleId   = id(), outlineId= id();
+
+  const notes = [
+    // Subjects
+    { id: sPhysics,   user_id: uid, type: 'subject',  parent_id: null, title: 'Physics',
+      color: '#6F00FF', tags: [], subject: 'Physics',
+      body: '## Physics\n\nCore natural science subject covering mechanics, thermodynamics, and more.',
+      created_at: now(), updated_at: now() },
+    { id: sMath,      user_id: uid, type: 'subject',  parent_id: null, title: 'Mathematics',
+      color: '#38BDF8', tags: [], subject: 'Mathematics',
+      body: '## Mathematics\n\nFoundations of calculus, algebra, and analysis.',
+      created_at: now(), updated_at: now() },
+
+    // Topics
+    { id: tMechanics, user_id: uid, type: 'topic',    parent_id: sPhysics, title: 'Classical Mechanics',
+      color: '#A78BFA', tags: ['core'], subject: 'Physics',
+      body: '## Classical Mechanics\n\nStudy of motion, forces, and energy in macroscopic systems.\n\n- Deals with objects much larger than atoms\n- Governed by Newton\'s laws',
+      created_at: now(), updated_at: now() },
+    { id: tThermo,    user_id: uid, type: 'topic',    parent_id: sPhysics, title: 'Thermodynamics',
+      color: '#FB923C', tags: ['core'], subject: 'Physics',
+      body: '## Thermodynamics\n\nStudy of heat, energy, and work.\n\n- First law: energy is conserved\n- Second law: entropy always increases',
+      created_at: now(), updated_at: now() },
+    { id: tCalc,      user_id: uid, type: 'topic',    parent_id: sMath, title: 'Calculus',
+      color: '#4ADE80', tags: ['analysis'], subject: 'Mathematics',
+      body: '## Calculus\n\nBranch of mathematics studying continuous change.\n\n- Differential calculus: rates of change\n- Integral calculus: accumulation',
+      created_at: now(), updated_at: now() },
+
+    // Subtopics
+    { id: stNewton,   user_id: uid, type: 'subtopic', parent_id: tMechanics, title: 'Newton\'s Laws',
+      color: '#C084FC', tags: [], subject: 'Physics',
+      body: '## Newton\'s Laws\n\nThree fundamental laws describing motion.\n\n- First law: an object at rest stays at rest\n- Second law: F = ma\n- Third law: every action has an equal and opposite reaction',
+      created_at: now(), updated_at: now() },
+    { id: stLimits,   user_id: uid, type: 'subtopic', parent_id: tCalc, title: 'Limits',
+      color: '#34D399', tags: [], subject: 'Mathematics',
+      body: '## Limits\n\nFoundation of calculus — what a function approaches as input nears a value.\n\n> The derivative is defined as a limit of a difference quotient\n\n- lim(x→a) f(x) = L means f(x) gets arbitrarily close to L',
+      created_at: now(), updated_at: now() },
+
+    // Notes
+    { id: nNewton1,   user_id: uid, type: 'note',     parent_id: stNewton, title: 'F = ma Derivation',
+      color: '#F472B6', tags: ['formula', 'key'], subject: 'Physics',
+      body: '## F = ma\n\nNewton\'s second law in its most compact form.\n\n- F is net force in Newtons\n- m is mass in kilograms\n- a is acceleration in m/s²\n\nSee also [[Limits]] for the calculus connection to acceleration.',
+      created_at: now(), updated_at: now() },
+    { id: nNewton2,   user_id: uid, type: 'note',     parent_id: stNewton, title: 'Inertia Examples',
+      color: '#F87171', tags: ['examples'], subject: 'Physics',
+      body: '## Inertia Examples\n\n- A ball rolling on a frictionless surface keeps rolling\n- Passengers lurch forward when a car brakes\n- A spinning top stays upright due to angular inertia\n\nInertia is proportional to mass — heavier objects resist acceleration more.',
+      created_at: now(), updated_at: now() },
+    { id: nLimits1,   user_id: uid, type: 'note',     parent_id: stLimits, title: 'L\'Hôpital\'s Rule',
+      color: '#22D3EE', tags: ['technique'], subject: 'Mathematics',
+      body: '## L\'Hôpital\'s Rule\n\nFor indeterminate forms 0/0 or ∞/∞:\n\n```lim f(x)/g(x) = lim f\'(x)/g\'(x)```\n\n- Only applies when both f and g approach 0 or ∞\n- Can be applied repeatedly if needed',
+      created_at: now(), updated_at: now() },
+    { id: nHeat,      user_id: uid, type: 'note',     parent_id: tThermo, title: 'Heat Transfer Modes',
+      color: '#FBBF24', tags: ['overview'], subject: 'Physics',
+      body: '## Heat Transfer\n\nThree mechanisms:\n\n- **Conduction** — transfer through direct contact (metals conduct well)\n- **Convection** — transfer via fluid movement (boiling water)\n- **Radiation** — transfer via electromagnetic waves (sunlight)',
+      created_at: now(), updated_at: now() },
+  ];
+
+  // Wikilink: F=ma note links to Limits
+  const note_links = [
+    { id: linkId1, user_id: uid, source: nNewton1, target: stLimits, kind: 'wikilink' },
+    { id: linkId2, user_id: uid, source: tMechanics, target: tCalc, kind: 'manual', color: '#6F00FF' },
+  ];
+
+  // A title and outline annotation on the graph canvas
+  const graph_objects = [
+    { id: titleId,   user_id: uid, type: 'title',   text: 'My Study Vault',
+      x: 0, y: -220, color: 'rgba(255,255,255,0.85)' },
+    { id: outlineId, user_id: uid, type: 'outline',
+      x1: -320, y1: -160, x2: 320, y2: 260, color: '#6F00FF' },
+  ];
+
+  cache.notes        = notes;
+  cache.note_links   = note_links;
+  cache.graph_objects= graph_objects;
 }
 
 function defaultSettings() {

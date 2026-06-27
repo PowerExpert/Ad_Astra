@@ -1,5 +1,5 @@
 /* ============================================================
-   NexusLearn — style.css
+   Ad Astra — style.css
    Obsidian-style AI Study Assistant
    Palette: #08080E void · #6F00FF violet · #FFFFFF white outlines
    ============================================================ */
@@ -17,8 +17,8 @@
   --surface:      #0F0F1A;
   --panel:        #13131F;
   --card:         #1A1A2A;
-  --border:       rgba(107, 92, 231, 0.25);
-  --border-hover: rgba(107, 92, 231, 0.6);
+  --border:       rgba(119, 0, 255, 0.507);
+  --border-hover: rgba(119, 0, 255, 0.507);
   --violet:       #6F00FF;
   --violet-bright:#A966FF;
   --violet-glow:  rgba(111, 0, 255, 0.15);
@@ -1548,10 +1548,10 @@ html.light {
   --surface:      #FFFFFF;
   --panel:        #F8F7FD;
   --card:         #EDEAF8;
-  --border:       rgba(111, 0, 255, 0.15);
-  --border-hover: rgba(111, 0, 255, 0.4);
+  --border:       rgba(119, 0, 255, 0.507);
+  --border-hover: rgba(119, 0, 255, 0.507);
   --violet-glow:  rgba(111, 0, 255, 0.07);
-  --white:        #1A1528;
+  --white:        #281526;
   --white-dim:    rgba(26, 21, 40, 0.75);
   --white-muted:  rgba(26, 21, 40, 0.45);
   --text:         #1A1528;
@@ -1561,8 +1561,6 @@ html.light {
   --warn:         #D97706;
 }
 
-/* Graph canvas always stays dark — it's a purpose-built canvas tool */
-html.light #graph-view { background: #0D0D18; }
 
 /* Scrollbars in light mode */
 html.light ::-webkit-scrollbar-thumb { background: rgba(111,0,255,0.2); }

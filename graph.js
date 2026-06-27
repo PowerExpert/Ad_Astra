@@ -114,8 +114,9 @@ export function startGraph() {
     t += 0.008;
 
     // ── 1. Background (screen space, before transform) ──────────
+    const isLight = document.documentElement.classList.contains('light');
     ctx.setTransform(1, 0, 0, 1, 0, 0); // reset to identity
-    ctx.fillStyle = '#08080E';
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--void').trim() || '#08080E';
     ctx.fillRect(0, 0, W, H);
 
     // ── 2. Enter world space ─────────────────────────────────────
@@ -139,7 +140,9 @@ export function startGraph() {
     const wx1 = (W - pan.x) / zoom,  wy1 = (H - pan.y) / zoom;
     const gx0 = Math.floor(wx0 / spacing) * spacing;
     const gy0 = Math.floor(wy0 / spacing) * spacing;
-    ctx.fillStyle = `rgba(63,63,63,${dotAlpha.toFixed(3)})`;
+    ctx.fillStyle = isLight
+      ? `rgba(160,140,200,${dotAlpha.toFixed(3)})`
+      : `rgba(63,63,63,${dotAlpha.toFixed(3)})`;
     for (let gx = gx0; gx <= wx1 + spacing; gx += spacing) {
       for (let gy = gy0; gy <= wy1 + spacing; gy += spacing) {
         ctx.beginPath();
@@ -171,7 +174,7 @@ export function startGraph() {
         ctx.beginPath();
         ctx.moveTo(na.x, na.y);
         ctx.lineTo(nb.x, nb.y);
-        ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+        ctx.strokeStyle = isLight ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.12)';
         ctx.lineWidth   = 1.6 / zoom;
         ctx.stroke();
         continue;
@@ -207,26 +210,69 @@ export function startGraph() {
     // ── 5. Nodes ─────────────────────────────────────────────────
     for (const n of nodes) {
       const r = nodeRadius(n);
+      const isSource = n.id === connectSourceId;
+
+      // Outer glow
+      const glowR = r * (n.type === 'subject' ? 2.2 : n.type === 'topic' ? 1.8 : 1.5);
+      const glow  = ctx.createRadialGradient(n.x, n.y, r * 0.5, n.x, n.y, glowR);
+      const glowAlpha = isLight ? 0.18 : 0.28;
+      glow.addColorStop(0, n.color + Math.round(glowAlpha * 255).toString(16).padStart(2,'0'));
+      glow.addColorStop(1, n.color + '00');
       ctx.beginPath();
-      drawNodeShape(ctx, n, r + 2 / zoom);
-      ctx.strokeStyle = n.id === connectSourceId ? 'rgba(139,127,238,0.9)' : 'rgba(255,255,255,0.18)';
-      ctx.lineWidth   = (n.id === connectSourceId ? 2 : 1) / zoom;
+      ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2);
+      ctx.fillStyle = glow;
+      ctx.fill();
+
+      // Outer ring
+      ctx.beginPath();
+      drawNodeShape(ctx, n, r + 3.5 / zoom);
+      if (isSource) {
+        ctx.strokeStyle = 'rgba(169,102,255,0.95)';
+        ctx.lineWidth   = 2.5 / zoom;
+      } else {
+        ctx.strokeStyle = isLight ? 'rgba(0,0,0,0.18)' : 'rgba(255,255,255,0.18)';
+        ctx.lineWidth   = 1.2 / zoom;
+      }
       ctx.stroke();
+
+      // Node body with radial gradient for depth
+      const bodyGrad = ctx.createRadialGradient(n.x - r * 0.25, n.y - r * 0.25, 0, n.x, n.y, r);
+      bodyGrad.addColorStop(0, lightenHex(n.color, isLight ? 0.55 : 0.45));
+      bodyGrad.addColorStop(1, n.color);
       ctx.beginPath();
       drawNodeShape(ctx, n, r);
-      ctx.fillStyle = n.color;
+      ctx.fillStyle = bodyGrad;
       ctx.fill();
+
+      // Inner specular highlight
+      const hlR = r * 0.38;
+      const hl  = ctx.createRadialGradient(n.x - r * 0.22, n.y - r * 0.22, 0, n.x - r * 0.18, n.y - r * 0.18, hlR);
+      hl.addColorStop(0, isLight ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.65)');
+      hl.addColorStop(1, 'rgba(255,255,255,0)');
       ctx.beginPath();
-      ctx.arc(n.x, n.y, r * 0.35, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.arc(n.x - r * 0.18, n.y - r * 0.18, hlR, 0, Math.PI * 2);
+      ctx.fillStyle = hl;
       ctx.fill();
+
+      // Label
       if (opts.labels) {
         const weight = n.type === 'subject' ? 700 : n.type === 'topic' ? 600 : 500;
         const size   = (n.type === 'subject' ? 13 : n.type === 'topic' ? 11.5 : n.type === 'subtopic' ? 10.5 : 10) / zoom;
+        const labelY = n.y + r + 14 / zoom;
         ctx.font      = `${weight} ${size}px 'Inter', sans-serif`;
-        ctx.fillStyle = n.type === 'subject' ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.65)';
         ctx.textAlign = 'center';
-        ctx.fillText(n.label, n.x, n.y + r + 13 / zoom);
+        if (isLight) {
+          ctx.shadowColor = 'rgba(255,255,255,0.9)';
+          ctx.shadowBlur  = 4 / zoom;
+          ctx.fillStyle   = n.type === 'subject' ? 'rgba(10,5,30,0.95)' : 'rgba(10,5,30,0.75)';
+        } else {
+          ctx.shadowColor = 'rgba(0,0,0,0.8)';
+          ctx.shadowBlur  = 5 / zoom;
+          ctx.fillStyle   = n.type === 'subject' ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.72)';
+        }
+        ctx.fillText(n.label, n.x, labelY);
+        ctx.shadowBlur  = 0;
+        ctx.shadowColor = 'transparent';
       }
     }
 
@@ -236,10 +282,14 @@ export function startGraph() {
       const live = (draggedTitleId === ti.id && titleDragLive) ? titleDragLive : ti;
       const size = TITLE_FONT_SIZE / zoom;
       ctx.font      = `700 ${size}px 'Space Grotesk', sans-serif`;
-      ctx.fillStyle = ti.color || 'rgba(255,255,255,0.92)';
+      // In light mode default title color flips to dark if it was the old default
+      const tiColor = ti.color || (isLight ? 'rgba(10,5,30,0.9)' : 'rgba(255,255,255,0.92)');
+      ctx.fillStyle = tiColor;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
+      if (isLight) { ctx.shadowColor = 'rgba(255,255,255,0.8)'; ctx.shadowBlur = 6 / zoom; }
       ctx.fillText(ti.text || 'Untitled', live.x, live.y);
+      ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
     }
     ctx.textBaseline = 'alphabetic';
 
@@ -250,7 +300,7 @@ export function startGraph() {
         ctx.beginPath();
         ctx.moveTo(src.x, src.y);
         ctx.lineTo(mouseWorld.x, mouseWorld.y);
-        ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+        ctx.strokeStyle = isLight ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.45)';
         ctx.lineWidth   = 1.5 / zoom;
         ctx.setLineDash([5 / zoom, 4 / zoom]);
         ctx.stroke();
@@ -292,6 +342,16 @@ export function stopGraph() {
 }
 
 // ── Node geometry ─────────────────────────────────────────────
+// Lighten a #rrggbb hex color by mixing toward white by `amount` (0–1)
+function lightenHex(hex, amount) {
+  const h = hex.replace('#','');
+  const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
+  const lr = Math.round(r + (255 - r) * amount);
+  const lg = Math.round(g + (255 - g) * amount);
+  const lb = Math.round(b + (255 - b) * amount);
+  return `rgb(${lr},${lg},${lb})`;
+}
+
 function nodeRadius(n) { return opts.nodeSize * 0.8 * (TYPE_RADIUS_MULT[n.type] || 1); }
 function hitRadius(n)  { return nodeRadius(n) + 6; }  // slightly larger hit area for comfort
 
@@ -787,7 +847,7 @@ function openCreateNodeModal(defaultType, wx, wy) {
     const candidates = getValidParents(ty);
     parentWrap.appendChild(el('div', { class: 'modal-sub' }, 'Parent'));
     parentWrap.appendChild(el('select', { class: 'select', id: 'create-node-parent' }, [
-      el('option', { value: '' }, candidates.length ? '— choose parent —' : `No ${validParentTypesFor(ty).join('/')} yet — create one first`),
+      el('option', { value: '' }, candidates.length ? 'choose parent' : `No ${validParentTypesFor(ty).join('/')} yet — create one first`),
       ...candidates.map(p => el('option', { value: p.id }, `[${p.type}] ${p.title}`)),
     ]));
   };
