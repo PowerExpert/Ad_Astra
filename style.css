@@ -1191,6 +1191,16 @@ html, body {
   min-width: 170px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.45);
 }
+.ctx-menu-section {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  padding: 8px 10px 4px;
+  margin-top: 2px;
+}
+.ctx-menu-section:first-child { padding-top: 4px; }
 .ctx-menu-title {
   font-size: 10.5px;
   font-weight: 600;
@@ -1561,6 +1571,8 @@ html.light {
   --warn:         #D97706;
 }
 
+/* Graph canvas always stays dark — it's a purpose-built canvas tool */
+html.light #graph-view { background: #0D0D18; }
 
 /* Scrollbars in light mode */
 html.light ::-webkit-scrollbar-thumb { background: rgba(111,0,255,0.2); }
@@ -1584,6 +1596,77 @@ html.light .node-tooltip { box-shadow: 0 16px 48px rgba(0,0,0,0.15); }
 /* AI panel orb pulse stays vivid */
 html.light .ai-subtitle { color: #16A34A; }
 
-/* Topbar hover tint */
-html.light .mode-btn:hover { background: rgba(111,0,255,0.06); }
-html.light .tb-btn:hover { border-color: rgba(111,0,255,0.4); color: var(--text); }
+
+/* ========================
+   KEYBOARD SHORTCUT OVERLAY
+   ======================== */
+.shortcut-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.shortcut-modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 460px;
+  max-width: calc(100vw - 32px);
+  box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+  overflow: hidden;
+}
+
+.shortcut-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--white);
+}
+
+.shortcut-list {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  transition: background 0.1s;
+}
+
+.shortcut-row:hover { background: var(--violet-glow); }
+
+.shortcut-keys {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--violet-bright);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 8px;
+  white-space: nowrap;
+  min-width: 160px;
+  flex-shrink: 0;
+  letter-spacing: 0.01em;
+}
+
+.shortcut-desc {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}

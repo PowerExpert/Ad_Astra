@@ -1,7 +1,7 @@
 // app.js — bootstrap, mode switch, settings wiring, auth UI, AI panel.
 import { initStorage, isLocalMode, getCurrentUser, onAuthChange, signIn, signUp, signOut, getSettings, updateSettings, getTests, getNotes, getNoteLinks } from './storage.js';
 import { initNotes, openTab, addNote, renderList, setModeSwitchCallback } from './notes.js';
-import { startGraph, stopGraph, setOpts, setOpenNoteCallback } from './graph.js';
+import { startGraph, stopGraph, setOpts, setOpenNoteCallback, bindGraphShortcuts } from './graph.js';
 import { aiChat } from './ai.js';
 import { initMaterials } from './materials.js';
 import { initTests, refreshTests } from './tests.js';
@@ -68,6 +68,10 @@ async function bootstrap() {
   applySettingsToUi(getSettings());
   showBannerIfNeeded();
   applyLayout();
+
+  // Global keyboard shortcuts
+  bindGraphShortcuts();
+  bindShortcutHelp();
 
   if (!isLocalMode() && !user.email) {
     renderAuthModal(true);
@@ -366,6 +370,50 @@ function renderAuthModal(visible) {
     host.appendChild(backdrop);
   };
   draw();
+}
+
+// ── Keyboard shortcut help overlay (press ?) ──────────────────
+function bindShortcutHelp() {
+  const SHORTCUTS = [
+    { keys: 'Ctrl + 1',  desc: 'Create Subject node at viewport centre' },
+    { keys: 'Ctrl + 2',  desc: 'Create Topic node at viewport centre' },
+    { keys: 'Ctrl + 3',  desc: 'Create Subtopic node at viewport centre' },
+    { keys: 'Ctrl + 4',  desc: 'Create Note node at viewport centre' },
+    { keys: 'Ctrl + K',  desc: 'Open search palette' },
+    { keys: '?',         desc: 'Show / hide this shortcut reference' },
+    { keys: 'Esc',       desc: 'Cancel active mode (connect / outline / line)' },
+  ];
+
+  let overlay = null;
+
+  const show = () => {
+    if (overlay) return;
+    overlay = el('div', { class: 'shortcut-overlay' }, [
+      el('div', { class: 'shortcut-modal' }, [
+        el('div', { class: 'shortcut-header' }, [
+          el('span', {}, 'Keyboard Shortcuts'),
+          el('span', { class: 'modal-close', onclick: hide }, '×'),
+        ]),
+        el('div', { class: 'shortcut-list' },
+          SHORTCUTS.map(s => el('div', { class: 'shortcut-row' }, [
+            el('span', { class: 'shortcut-keys' }, s.keys),
+            el('span', { class: 'shortcut-desc' }, s.desc),
+          ]))
+        ),
+      ]),
+    ]);
+    overlay.addEventListener('mousedown', e => { if (e.target === overlay) hide(); });
+    document.body.appendChild(overlay);
+  };
+
+  const hide = () => { overlay?.remove(); overlay = null; };
+
+  document.addEventListener('keydown', e => {
+    const tag = document.activeElement?.tagName?.toLowerCase();
+    const editing = tag === 'input' || tag === 'textarea' || document.activeElement?.isContentEditable;
+    if (!editing && e.key === '?') { e.preventDefault(); overlay ? hide() : show(); }
+    if (e.key === 'Escape' && overlay) hide();
+  });
 }
 
 bootstrap().catch(err => {

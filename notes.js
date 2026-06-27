@@ -132,6 +132,28 @@ export function openTab(id) {
   renderList();
 }
 
+// Registers the tab and renders the editor WITHOUT switching the primary
+// view away from graph. Used when creating a node from the graph canvas —
+// the note is queued so opening it later (click/shortcut) works instantly,
+// but the user stays on the graph.
+export function registerTabSilent(id) {
+  if (!id) return;
+  if (!openTabs.includes(id)) openTabs.push(id);
+  activeId = id;
+  // Render editor in the background so it's ready, but don't call
+  // modeSwitchCb — that's what would flip the view to Notes.
+  renderTabs();
+  renderEditor();
+  renderList();
+}
+
+export function focusNoteBody() {
+  requestAnimationFrame(() => {
+    const body = document.querySelector('#note-display .note-body');
+    if (body) { body.focus(); body.selectionStart = body.selectionEnd = body.value.length; }
+  });
+}
+
 export function closeTab(id) {
   openTabs = openTabs.filter(t => t !== id);
   if (activeId === id) activeId = openTabs[openTabs.length - 1] || null;

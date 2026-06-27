@@ -43,6 +43,7 @@
         <span class="tb-shortcut">Ctrl K</span>
       </button>
       <button class="tb-btn" id="btn-settings" onclick="window.__toggleSettings()">Customize</button>
+      <button class="tb-btn" id="btn-shortcuts" title="Keyboard shortcuts" onclick="document.dispatchEvent(new KeyboardEvent('keydown',{key:'?',bubbles:true}))">?</button>
       <div class="tb-avatar" id="tb-avatar">·</div>
       <button class="tb-btn" id="btn-auth" style="display:none">Sign in</button>
       <button class="tb-btn" id="btn-signout" style="display:none">Sign out</button>

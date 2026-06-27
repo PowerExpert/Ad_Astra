@@ -16,7 +16,7 @@ import {
   getGraphObjects, createGraphObject, updateGraphObject, deleteGraphObject,
 } from './storage.js';
 import { el, $, clear, toast, openContextMenu, closeContextMenu, contextMenuItems } from './ui.js';
-import { renderList } from './notes.js';
+import { renderList, registerTabSilent } from './notes.js';
 
 // ── Viewport state ────────────────────────────────────────────
 let pan  = { x: 0, y: 0 };   // screen-space offset of the world origin
@@ -55,6 +55,19 @@ let outlineDragLive   = null;  // { dx, dy } world-space delta
 
 // Outline two-click placement
 let outlinePlacement  = null;  // null | {} | { x1, y1 }
+
+// Line two-click placement (same pattern as outline)
+let linePlacement     = null;  // null | {} | { x1, y1 }
+
+// Sticky note drag
+let draggedStickyId   = null;
+let stickyDragOffset  = { x: 0, y: 0 };
+let stickyDragLive    = null;  // {x, y} world space
+
+// Line drag (moves both endpoints by same delta)
+let draggedLineId     = null;
+let lineDragStart     = null;
+let lineDragLive      = null;  // { dx, dy }
 
 // Connect mode
 let connectSourceId   = null;
@@ -114,9 +127,8 @@ export function startGraph() {
     t += 0.008;
 
     // ── 1. Background (screen space, before transform) ──────────
-    const isLight = document.documentElement.classList.contains('light');
     ctx.setTransform(1, 0, 0, 1, 0, 0); // reset to identity
-    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--void').trim() || '#08080E';
+    ctx.fillStyle = '#08080E';
     ctx.fillRect(0, 0, W, H);
 
     // ── 2. Enter world space ─────────────────────────────────────
@@ -140,9 +152,7 @@ export function startGraph() {
     const wx1 = (W - pan.x) / zoom,  wy1 = (H - pan.y) / zoom;
     const gx0 = Math.floor(wx0 / spacing) * spacing;
     const gy0 = Math.floor(wy0 / spacing) * spacing;
-    ctx.fillStyle = isLight
-      ? `rgba(160,140,200,${dotAlpha.toFixed(3)})`
-      : `rgba(63,63,63,${dotAlpha.toFixed(3)})`;
+    ctx.fillStyle = `rgba(63,63,63,${dotAlpha.toFixed(3)})`;
     for (let gx = gx0; gx <= wx1 + spacing; gx += spacing) {
       for (let gy = gy0; gy <= wy1 + spacing; gy += spacing) {
         ctx.beginPath();
@@ -164,6 +174,63 @@ export function startGraph() {
       ctx.setLineDash([]);
     }
 
+    // ── 3b. Lines ─────────────────────────────────────────────────
+    const lines = currentLines();
+    for (const ln of lines) {
+      const live = (draggedLineId === ln.id && lineDragLive) ? lineDragLive : { dx: 0, dy: 0 };
+      ctx.beginPath();
+      ctx.moveTo(ln.x1 + live.dx, ln.y1 + live.dy);
+      ctx.lineTo(ln.x2 + live.dx, ln.y2 + live.dy);
+      ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+      ctx.lineWidth   = 1.5 / zoom;
+      ctx.stroke();
+    }
+
+    // ── 3c. Sticky notes ──────────────────────────────────────────
+    const STICKY_W = 160, STICKY_H = 100, STICKY_PAD = 10;
+    const stickies = currentStickies();
+    for (const s of stickies) {
+      const live = (draggedStickyId === s.id && stickyDragLive) ? stickyDragLive : s;
+      const sx = live.x, sy = live.y;
+      const bg = s.color || '#FBBF24';
+      // Shadow
+      ctx.shadowColor = 'rgba(0,0,0,0.35)';
+      ctx.shadowBlur  = 10 / zoom;
+      ctx.shadowOffsetY = 3 / zoom;
+      // Body
+      ctx.fillStyle = bg;
+      ctx.beginPath();
+      ctx.roundRect(sx, sy, STICKY_W / zoom, STICKY_H / zoom, 4 / zoom);
+      ctx.fill();
+      ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+      // Top strip (slightly darker)
+      ctx.fillStyle = 'rgba(0,0,0,0.12)';
+      ctx.beginPath();
+      ctx.roundRect(sx, sy, STICKY_W / zoom, 18 / zoom, [4 / zoom, 4 / zoom, 0, 0]);
+      ctx.fill();
+      // Text
+      const fontSize = 11 / zoom;
+      ctx.font      = `500 ${fontSize}px 'Inter', sans-serif`;
+      ctx.fillStyle = 'rgba(0,0,0,0.82)';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const maxW = (STICKY_W - STICKY_PAD * 2) / zoom;
+      const words = (s.text || '').split(' ');
+      let line2 = '', lineY = sy + 22 / zoom;
+      for (const word of words) {
+        const test = line2 ? line2 + ' ' + word : word;
+        if (ctx.measureText(test).width > maxW && line2) {
+          ctx.fillText(line2, sx + STICKY_PAD / zoom, lineY);
+          line2 = word;
+          lineY += (fontSize + 3 / zoom);
+          if (lineY > sy + (STICKY_H - STICKY_PAD) / zoom) break;
+        } else { line2 = test; }
+      }
+      if (line2) ctx.fillText(line2, sx + STICKY_PAD / zoom, lineY);
+      ctx.textBaseline = 'alphabetic';
+      ctx.textAlign    = 'center';
+    }
+
     // ── 4. Links ─────────────────────────────────────────────────
     const nodes = currentNodes();
     const links = currentLinks();
@@ -174,7 +241,7 @@ export function startGraph() {
         ctx.beginPath();
         ctx.moveTo(na.x, na.y);
         ctx.lineTo(nb.x, nb.y);
-        ctx.strokeStyle = isLight ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.12)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.12)';
         ctx.lineWidth   = 1.6 / zoom;
         ctx.stroke();
         continue;
@@ -210,69 +277,26 @@ export function startGraph() {
     // ── 5. Nodes ─────────────────────────────────────────────────
     for (const n of nodes) {
       const r = nodeRadius(n);
-      const isSource = n.id === connectSourceId;
-
-      // Outer glow
-      const glowR = r * (n.type === 'subject' ? 2.2 : n.type === 'topic' ? 1.8 : 1.5);
-      const glow  = ctx.createRadialGradient(n.x, n.y, r * 0.5, n.x, n.y, glowR);
-      const glowAlpha = isLight ? 0.18 : 0.28;
-      glow.addColorStop(0, n.color + Math.round(glowAlpha * 255).toString(16).padStart(2,'0'));
-      glow.addColorStop(1, n.color + '00');
       ctx.beginPath();
-      ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2);
-      ctx.fillStyle = glow;
-      ctx.fill();
-
-      // Outer ring
-      ctx.beginPath();
-      drawNodeShape(ctx, n, r + 3.5 / zoom);
-      if (isSource) {
-        ctx.strokeStyle = 'rgba(169,102,255,0.95)';
-        ctx.lineWidth   = 2.5 / zoom;
-      } else {
-        ctx.strokeStyle = isLight ? 'rgba(0,0,0,0.18)' : 'rgba(255,255,255,0.18)';
-        ctx.lineWidth   = 1.2 / zoom;
-      }
+      drawNodeShape(ctx, n, r + 2 / zoom);
+      ctx.strokeStyle = n.id === connectSourceId ? 'rgba(139,127,238,0.9)' : 'rgba(255,255,255,0.18)';
+      ctx.lineWidth   = (n.id === connectSourceId ? 2 : 1) / zoom;
       ctx.stroke();
-
-      // Node body with radial gradient for depth
-      const bodyGrad = ctx.createRadialGradient(n.x - r * 0.25, n.y - r * 0.25, 0, n.x, n.y, r);
-      bodyGrad.addColorStop(0, lightenHex(n.color, isLight ? 0.55 : 0.45));
-      bodyGrad.addColorStop(1, n.color);
       ctx.beginPath();
       drawNodeShape(ctx, n, r);
-      ctx.fillStyle = bodyGrad;
+      ctx.fillStyle = n.color;
       ctx.fill();
-
-      // Inner specular highlight
-      const hlR = r * 0.38;
-      const hl  = ctx.createRadialGradient(n.x - r * 0.22, n.y - r * 0.22, 0, n.x - r * 0.18, n.y - r * 0.18, hlR);
-      hl.addColorStop(0, isLight ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.65)');
-      hl.addColorStop(1, 'rgba(255,255,255,0)');
       ctx.beginPath();
-      ctx.arc(n.x - r * 0.18, n.y - r * 0.18, hlR, 0, Math.PI * 2);
-      ctx.fillStyle = hl;
+      ctx.arc(n.x, n.y, r * 0.35, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
       ctx.fill();
-
-      // Label
       if (opts.labels) {
         const weight = n.type === 'subject' ? 700 : n.type === 'topic' ? 600 : 500;
         const size   = (n.type === 'subject' ? 13 : n.type === 'topic' ? 11.5 : n.type === 'subtopic' ? 10.5 : 10) / zoom;
-        const labelY = n.y + r + 14 / zoom;
         ctx.font      = `${weight} ${size}px 'Inter', sans-serif`;
+        ctx.fillStyle = n.type === 'subject' ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.65)';
         ctx.textAlign = 'center';
-        if (isLight) {
-          ctx.shadowColor = 'rgba(255,255,255,0.9)';
-          ctx.shadowBlur  = 4 / zoom;
-          ctx.fillStyle   = n.type === 'subject' ? 'rgba(10,5,30,0.95)' : 'rgba(10,5,30,0.75)';
-        } else {
-          ctx.shadowColor = 'rgba(0,0,0,0.8)';
-          ctx.shadowBlur  = 5 / zoom;
-          ctx.fillStyle   = n.type === 'subject' ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.72)';
-        }
-        ctx.fillText(n.label, n.x, labelY);
-        ctx.shadowBlur  = 0;
-        ctx.shadowColor = 'transparent';
+        ctx.fillText(n.label, n.x, n.y + r + 13 / zoom);
       }
     }
 
@@ -282,14 +306,10 @@ export function startGraph() {
       const live = (draggedTitleId === ti.id && titleDragLive) ? titleDragLive : ti;
       const size = TITLE_FONT_SIZE / zoom;
       ctx.font      = `700 ${size}px 'Space Grotesk', sans-serif`;
-      // In light mode default title color flips to dark if it was the old default
-      const tiColor = ti.color || (isLight ? 'rgba(10,5,30,0.9)' : 'rgba(255,255,255,0.92)');
-      ctx.fillStyle = tiColor;
+      ctx.fillStyle = ti.color || 'rgba(255,255,255,0.92)';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      if (isLight) { ctx.shadowColor = 'rgba(255,255,255,0.8)'; ctx.shadowBlur = 6 / zoom; }
       ctx.fillText(ti.text || 'Untitled', live.x, live.y);
-      ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
     }
     ctx.textBaseline = 'alphabetic';
 
@@ -300,7 +320,7 @@ export function startGraph() {
         ctx.beginPath();
         ctx.moveTo(src.x, src.y);
         ctx.lineTo(mouseWorld.x, mouseWorld.y);
-        ctx.strokeStyle = isLight ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.45)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.45)';
         ctx.lineWidth   = 1.5 / zoom;
         ctx.setLineDash([5 / zoom, 4 / zoom]);
         ctx.stroke();
@@ -318,12 +338,22 @@ export function startGraph() {
       ctx.strokeRect(ox1, oy1, ox2 - ox1, oy2 - oy1);
       ctx.setLineDash([]);
     }
+    if (linePlacement && linePlacement.x1 !== undefined) {
+      ctx.beginPath();
+      ctx.moveTo(linePlacement.x1, linePlacement.y1);
+      ctx.lineTo(mouseWorld.x, mouseWorld.y);
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth   = 1.5 / zoom;
+      ctx.setLineDash([5 / zoom, 4 / zoom]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
     // Update cursor to give clear feedback about current interaction mode
     const canvas2 = $('#graph-canvas');
     if (canvas2) {
       if (panDragging) canvas2.style.cursor = 'grabbing';
-      else if (connectSourceId || outlinePlacement) canvas2.style.cursor = 'crosshair';
+      else if (connectSourceId || outlinePlacement || linePlacement) canvas2.style.cursor = 'crosshair';
       else canvas2.style.cursor = 'default';
     }
 
@@ -342,16 +372,6 @@ export function stopGraph() {
 }
 
 // ── Node geometry ─────────────────────────────────────────────
-// Lighten a #rrggbb hex color by mixing toward white by `amount` (0–1)
-function lightenHex(hex, amount) {
-  const h = hex.replace('#','');
-  const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
-  const lr = Math.round(r + (255 - r) * amount);
-  const lg = Math.round(g + (255 - g) * amount);
-  const lb = Math.round(b + (255 - b) * amount);
-  return `rgb(${lr},${lg},${lb})`;
-}
-
 function nodeRadius(n) { return opts.nodeSize * 0.8 * (TYPE_RADIUS_MULT[n.type] || 1); }
 function hitRadius(n)  { return nodeRadius(n) + 6; }  // slightly larger hit area for comfort
 
@@ -383,6 +403,8 @@ function currentLinks() {
 }
 function currentTitles()   { return getGraphObjects().filter(o => o.type === 'title'); }
 function currentOutlines() { return getGraphObjects().filter(o => o.type === 'outline'); }
+function currentStickies() { return getGraphObjects().filter(o => o.type === 'sticky'); }
+function currentLines()    { return getGraphObjects().filter(o => o.type === 'line'); }
 
 // ── Initial layout ────────────────────────────────────────────
 function rebuildPositions(W, H) {
@@ -448,6 +470,14 @@ function outlineEdgeHit(wx, wy, o) {
   return [[x1,y1,x2,y1],[x1,y2,x2,y2],[x1,y1,x1,y2],[x2,y1,x2,y2]]
     .some(([ex1,ey1,ex2,ey2]) => distToSegment(wx, wy, ex1, ey1, ex2, ey2) < threshold);
 }
+
+const STICKY_W = 160, STICKY_H = 100;
+function stickyBounds(s) {
+  return { x: s.x, y: s.y, w: STICKY_W / zoom, h: STICKY_H / zoom };
+}
+function lineHitTestObj(wx, wy, ln) {
+  return distToSegment(wx, wy, ln.x1, ln.y1, ln.x2, ln.y2) < 8 / zoom;
+}
 function linkHitTest(wx, wy, nodes) {
   const threshold = 7 / zoom;
   for (const l of getNoteLinks()) {
@@ -506,6 +536,19 @@ function bindInteraction(canvas) {
       return;
     }
 
+    // ── Line placement (two-click flow) ──────────────────────
+    if (linePlacement) {
+      if (linePlacement.x1 === undefined) {
+        linePlacement = { x1: wx, y1: wy };
+        toast('Click the end point — Esc to cancel');
+      } else {
+        createGraphObject({ type: 'line', x1: linePlacement.x1, y1: linePlacement.y1, x2: wx, y2: wy });
+        cancelLinePlacement();
+        toast('Line added');
+      }
+      return;
+    }
+
     // ── Connect mode ─────────────────────────────────────────
     if (connectSourceId) {
       const hit = nodes.find(n => Math.hypot(n.x - wx, n.y - wy) < hitRadius(n));
@@ -541,6 +584,24 @@ function bindInteraction(canvas) {
       return;
     }
 
+    // ── Sticky drag (full body hit) ──────────────────────────
+    const stickyHit = currentStickies().find(s => pointInRect(wx, wy, stickyBounds(s)));
+    if (stickyHit) {
+      draggedStickyId  = stickyHit.id;
+      stickyDragOffset = { x: wx - stickyHit.x, y: wy - stickyHit.y };
+      stickyDragLive   = { x: stickyHit.x, y: stickyHit.y };
+      return;
+    }
+
+    // ── Line drag ─────────────────────────────────────────────
+    const lineHit = currentLines().find(ln => lineHitTestObj(wx, wy, ln));
+    if (lineHit) {
+      draggedLineId  = lineHit.id;
+      lineDragStart  = { x: wx, y: wy };
+      lineDragLive   = { dx: 0, dy: 0 };
+      return;
+    }
+
     // ── Pan drag (empty space) ───────────────────────────────
     panDragging  = true;
     panDragStart = { sx, sy, px: pan.x, py: pan.y };
@@ -570,6 +631,14 @@ function bindInteraction(canvas) {
     if (draggedOutlineId && outlineDragStart && outlineDragLive) {
       outlineDragLive.dx = w.x - outlineDragStart.x;
       outlineDragLive.dy = w.y - outlineDragStart.y;
+    }
+    if (draggedStickyId && stickyDragLive) {
+      stickyDragLive.x = w.x - stickyDragOffset.x;
+      stickyDragLive.y = w.y - stickyDragOffset.y;
+    }
+    if (draggedLineId && lineDragStart && lineDragLive) {
+      lineDragLive.dx = w.x - lineDragStart.x;
+      lineDragLive.dy = w.y - lineDragStart.y;
     }
 
     // ── Hover tooltip ─────────────────────────────────────────
@@ -636,6 +705,18 @@ function bindInteraction(canvas) {
       outlineDragLive  = null;
       outlineDragStart = null;
     }
+    if (draggedStickyId && stickyDragLive) {
+      updateGraphObject(draggedStickyId, { x: stickyDragLive.x, y: stickyDragLive.y });
+      draggedStickyId = null;
+      stickyDragLive  = null;
+    }
+    if (draggedLineId && lineDragLive) {
+      const ln = currentLines().find(x => x.id === draggedLineId);
+      if (ln) updateGraphObject(draggedLineId, { x1: ln.x1 + lineDragLive.dx, y1: ln.y1 + lineDragLive.dy, x2: ln.x2 + lineDragLive.dx, y2: ln.y2 + lineDragLive.dy });
+      draggedLineId  = null;
+      lineDragLive   = null;
+      lineDragStart  = null;
+    }
   });
 
   canvas.addEventListener('contextmenu', (e) => {
@@ -649,8 +730,12 @@ function bindInteraction(canvas) {
     if (nodeHit)    { showNodeContextMenu(nodeHit, e.clientX, e.clientY); return; }
     const titleHit   = currentTitles().find(ti => pointInRect(wx, wy, titleBounds(ti)));
     if (titleHit)   { showTitleContextMenu(titleHit, e.clientX, e.clientY); return; }
+    const stickyHit2 = currentStickies().find(s => pointInRect(wx, wy, stickyBounds(s)));
+    if (stickyHit2) { showStickyContextMenu(stickyHit2, e.clientX, e.clientY); return; }
     const outlineHit = currentOutlines().find(o => outlineEdgeHit(wx, wy, o));
     if (outlineHit) { showOutlineContextMenu(outlineHit, e.clientX, e.clientY); return; }
+    const lineHit2   = currentLines().find(ln => lineHitTestObj(wx, wy, ln));
+    if (lineHit2)   { showLineContextMenu(lineHit2, e.clientX, e.clientY); return; }
     const linkHit    = linkHitTest(wx, wy, nodes);
     if (linkHit)    { showLinkContextMenu(linkHit, e.clientX, e.clientY); return; }
     showCanvasContextMenu(wx, wy, e.clientX, e.clientY);
@@ -735,6 +820,7 @@ function hideTooltip() {
 // ── Connect mode ──────────────────────────────────────────────
 function armConnectMode(id) {
   cancelOutlinePlacement();
+  cancelLinePlacement();
   connectSourceId = id;
   toast('Click another node to connect it — Esc to cancel');
   window.addEventListener('keydown', onConnectKey);
@@ -749,6 +835,7 @@ function cancelConnectMode() {
 // ── Outline two-click placement ───────────────────────────────
 function armOutlinePlacement() {
   cancelConnectMode();
+  cancelLinePlacement();
   outlinePlacement = {};
   toast('Click the first corner — Esc to cancel');
   window.addEventListener('keydown', onOutlineKey);
@@ -760,18 +847,35 @@ function cancelOutlinePlacement() {
   window.removeEventListener('keydown', onOutlineKey);
 }
 
+// ── Line two-click placement ──────────────────────────────────
+function armLinePlacement() {
+  cancelConnectMode();
+  cancelOutlinePlacement();
+  linePlacement = {};
+  toast('Click the start point — Esc to cancel');
+  window.addEventListener('keydown', onLineKey);
+}
+function onLineKey(e) { if (e.key === 'Escape') cancelLinePlacement(); }
+function cancelLinePlacement() {
+  if (linePlacement === null) return;
+  linePlacement = null;
+  window.removeEventListener('keydown', onLineKey);
+}
+
 // ── Context menus ─────────────────────────────────────────────
 function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
 function showCanvasContextMenu(wx, wy, clientX, clientY) {
+  const section = (label) => el('div', { class: 'ctx-menu-section' }, label);
+  const item = (label, fn) => el('div', { class: 'ctx-menu-item', onclick: () => { closeContextMenu(); fn(); } }, label);
   const menu = el('div', { class: 'ctx-menu' }, [
-    el('div', { class: 'ctx-menu-title' }, 'Add to graph'),
-    ...['subject','topic','subtopic','note'].map(ty => el('div', {
-      class: 'ctx-menu-item',
-      onclick: () => { closeContextMenu(); openCreateNodeModal(ty, wx, wy); },
-    }, '+ ' + capitalize(ty))),
-    el('div', { class: 'ctx-menu-item', onclick: () => { closeContextMenu(); openCreateTitleModal(wx, wy); } }, '+ Title'),
-    el('div', { class: 'ctx-menu-item', onclick: () => { closeContextMenu(); armOutlinePlacement(); } }, '+ Outline'),
+    section('Nodes'),
+    ...['subject','topic','subtopic','note'].map(ty => item('+ ' + capitalize(ty), () => openCreateNodeModal(ty, wx, wy))),
+    section('Objects'),
+    item('+ Title',   () => openCreateTitleModal(wx, wy)),
+    item('+ Outline', () => armOutlinePlacement()),
+    item('+ Line',    () => armLinePlacement()),
+    item('+ Sticky',  () => openCreateStickyModal(wx, wy)),
   ]);
   openContextMenu(menu, clientX, clientY);
 }
@@ -792,7 +896,33 @@ function showNodeContextMenu(node, clientX, clientY) {
   ]), clientX, clientY);
 }
 
-function showTitleContextMenu(ti, clientX, clientY) {
+function showStickyContextMenu(s, clientX, clientY) {
+  const STICKY_COLORS = ['#FBBF24','#4ADE80','#38BDF8','#F472B6','#A78BFA','#FB923C','#F87171'];
+  const cur = (s.color || '').toLowerCase();
+  const swatchRow = el('div', { class: 'ctx-swatch-row' },
+    STICKY_COLORS.map(c => el('div', {
+      class: 'ctx-swatch' + (cur === c.toLowerCase() ? ' selected' : ''),
+      style: { background: c },
+      onclick: () => { closeContextMenu(); updateGraphObject(s.id, { color: c }); },
+    }))
+  );
+  openContextMenu(el('div', { class: 'ctx-menu' }, [
+    el('div', { class: 'ctx-menu-title' }, 'Sticky note'),
+    swatchRow,
+    el('div', { class: 'ctx-menu-item', onclick: () => {
+      closeContextMenu();
+      const v = prompt('Edit sticky text', s.text || '');
+      if (v != null) updateGraphObject(s.id, { text: v });
+    } }, 'Edit text'),
+    el('div', { class: 'ctx-menu-item ctx-menu-danger', onclick: () => { closeContextMenu(); deleteGraphObject(s.id); } }, 'Delete'),
+  ]), clientX, clientY);
+}
+
+function showLineContextMenu(ln, clientX, clientY) {
+  openContextMenu(contextMenuItems('Line', [
+    { label: 'Delete', danger: true, onClick: () => deleteGraphObject(ln.id) },
+  ]), clientX, clientY);
+}
   openContextMenu(contextMenuItems(ti.text || 'Title', [
     { label: 'Edit text', onClick: () => {
       const v = prompt('Title text', ti.text || '');
@@ -881,6 +1011,9 @@ function openCreateNodeModal(defaultType, wx, wy) {
     document.body.removeChild(host);
     renderList();
     toast(`Created ${ty}: ${title}`);
+    // Register the new node as the active tab so it's ready when the user
+    // switches to Notes, but do NOT flip the primary view away from Graph.
+    registerTabSilent(note.id);
   });
   cancelBtn.addEventListener('click', () => document.body.removeChild(host));
 
@@ -918,6 +1051,68 @@ function openCreateTitleModal(wx, wy) {
   ]));
   document.body.appendChild(host);
   textInput.focus();
+}
+
+function openCreateStickyModal(wx, wy) {
+  const host = el('div', { class: 'modal-backdrop' });
+  const textArea = el('textarea', { class: 'input', placeholder: 'Sticky note text…', style: { minHeight: '80px', resize: 'vertical' } });
+  const err = el('div', { class: 'modal-sub' }, '');
+  const createBtn = el('button', { class: 'btn-primary' }, 'Create');
+  const cancelBtn = el('button', { class: 'btn-ghost' }, 'Cancel');
+  createBtn.addEventListener('click', async () => {
+    const text = textArea.value.trim();
+    if (!text) { err.textContent = 'Text required'; return; }
+    await createGraphObject({ type: 'sticky', text, x: wx, y: wy, color: '#FBBF24' });
+    document.body.removeChild(host);
+    toast('Sticky added');
+  });
+  cancelBtn.addEventListener('click', () => document.body.removeChild(host));
+  host.appendChild(el('div', { class: 'modal' }, [
+    el('div', { class: 'modal-title' }, 'Add sticky note'),
+    el('div', { class: 'modal-sub' }, 'Quick annotation pinned to the canvas'),
+    textArea, err,
+    el('div', { style: { display: 'flex', gap: '8px', marginTop: '4px' } }, [createBtn, cancelBtn]),
+  ]));
+  document.body.appendChild(host);
+  textArea.focus();
+}
+
+// ── Keyboard shortcuts ────────────────────────────────────────
+// Ctrl+1..4  → open "Create node" modal pre-set to subject/topic/subtopic/note
+// Ctrl+Shift+1 → start outline placement
+// Ctrl+Shift+2 → open "Add title" modal
+// All shortcuts place the new object at the centre of the current viewport.
+const NODE_SHORTCUT_TYPES = ['subject', 'topic', 'subtopic', 'note'];
+
+export function bindGraphShortcuts() {
+  document.addEventListener('keydown', (e) => {
+    // Don't fire while the user is typing in any input/textarea/contenteditable
+    const tag = document.activeElement?.tagName?.toLowerCase();
+    const isEditing = tag === 'input' || tag === 'textarea' || document.activeElement?.isContentEditable;
+    if (isEditing) return;
+
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (!ctrl) return;
+
+    const num = parseInt(e.key, 10);  // 1..4
+
+    if (e.shiftKey) return;  // no Ctrl+Shift shortcuts
+
+    // Ctrl+1..4 → node types
+    if (num >= 1 && num <= 4) {
+      e.preventDefault();
+      const type = NODE_SHORTCUT_TYPES[num - 1];
+      openCreateNodeModal(type, ...viewportCentre());
+    }
+  });
+}
+
+// Returns [wx, wy] world-space centre of the current viewport.
+function viewportCentre() {
+  const canvas = $('#graph-canvas');
+  const W = canvas?.width  || window.innerWidth;
+  const H = canvas?.height || window.innerHeight;
+  return [(W / 2 - pan.x) / zoom, (H / 2 - pan.y) / zoom];
 }
 
 // ── Persistence ───────────────────────────────────────────────
