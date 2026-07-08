@@ -17,6 +17,7 @@ import {
 } from './storage.js';
 import { el, $, clear, toast, openContextMenu, closeContextMenu, contextMenuItems } from './ui.js';
 import { renderList, registerTabSilent } from './notes.js';
+import { triggerAutoSuggest } from './ai-suggest.js';
 
 // ── Viewport state ────────────────────────────────────────────
 let pan  = { x: 0, y: 0 };   // screen-space offset of the world origin
@@ -1355,6 +1356,8 @@ function openCreateNodeModal(defaultType, wx, wy) {
     // Register the new node as the active tab so it's ready when the user
     // switches to Notes, but do NOT flip the primary view away from Graph.
     registerTabSilent(note.id);
+    // AI auto-suggest siblings (fires async, non-blocking)
+    triggerAutoSuggest(note, positions, savePositions);
   });
   cancelBtn.addEventListener('click', () => document.body.removeChild(host));
 

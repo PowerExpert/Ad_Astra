@@ -5,13 +5,52 @@
 import {
   getNotes, getNote, getNoteLinks, getNoteByTitle,
   createNote, updateNote, deleteNote,
-  getChildren, getDescendants, validParentTypesFor, migrateNotesToHierarchy,
-} from './storage.js';import { el, $, $$, clear, renderMarkdownish, formatDate, toast, openContextMenu, contextMenuItems } from './ui.js';
+  getChildren, getDescendants, getAncestors, validParentTypesFor, migrateNotesToHierarchy,
+  getSettings,
+} from './storage.js';
+import { triggerAutoSuggest } from './ai-suggest.js';import { el, $, $$, clear, renderMarkdownish, formatDate, toast, openContextMenu, contextMenuItems } from './ui.js';
 
 let activeId = null;
 let saveTimer = null;
 let openTabs = [];
 let modeSwitchCb = null;
+
+// ── Sidebar customization state (quick filter text + collapsed node ids) ──
+let sidebarFilter = '';
+const COLLAPSE_KEY = 'adastra.sidebarCollapsed';
+let collapsed = loadCollapsed();
+
+function loadCollapsed() {
+  try { return new Set(JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '[]')); } catch { return new Set(); }
+}
+function saveCollapsed() {
+  try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsed])); } catch {}
+}
+function toggleCollapse(id) {
+  if (collapsed.has(id)) collapsed.delete(id); else collapsed.add(id);
+  saveCollapsed();
+  renderList();
+}
+function collapseAll() {
+  collapsed = new Set(getNotes().filter(n => getChildren(n.id).length > 0).map(n => n.id));
+  saveCollapsed();
+  renderList();
+}
+function expandAll() {
+  collapsed = new Set();
+  saveCollapsed();
+  renderList();
+}
+function sortNodes(nodes, sortMode) {
+  const arr = nodes.slice();
+  if (sortMode === 'updated') arr.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+  else arr.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+  return arr;
+}
+function wordCount(text) {
+  const words = (text.trim().match(/\S+/g) || []).length;
+  return `${words} word${words === 1 ? '' : 's'} · ${text.length} chars`;
+}
 
 const TYPE_BADGE = { subject: 'SUB', topic: 'TOP', subtopic: 'SUBT', note: 'N' };
 
@@ -34,6 +73,10 @@ export async function initNotes() {
   $('#editor-content').addEventListener('click', onEditorClick);
   $('#editor-tabs').addEventListener('click', onTabsClick);
   $$('.tab-close').forEach(x => x.addEventListener('click', e => { e.stopPropagation(); }));
+
+  $('#sidebar-filter-input')?.addEventListener('input', (e) => { sidebarFilter = e.target.value; renderList(); });
+  $('#btn-collapse-all')?.addEventListener('click', collapseAll);
+  $('#btn-expand-all')?.addEventListener('click', expandAll);
 }
 
 export function activeNoteId() { return activeId; }
@@ -44,16 +87,49 @@ export function renderList() {
   const list = $('#note-list');
   if (!list) return;
   clear(list);
+
+  const settings = getSettings();
+  const sortMode = settings.sidebarOpts?.sort || 'name';
+  const query = sidebarFilter.trim().toLowerCase();
+
+  // While filtering, show matches plus their ancestors (for context) —
+  // everything else is hidden rather than dimmed, so the tree stays short.
+  let visibleIds = null;
+  if (query) {
+    visibleIds = new Set();
+    for (const n of getNotes()) {
+      if ((n.title || '').toLowerCase().includes(query)) {
+        visibleIds.add(n.id);
+        for (const a of getAncestors(n.id)) visibleIds.add(a.id);
+      }
+    }
+  }
+
   const renderNode = (n, depth) => {
+    if (visibleIds && !visibleIds.has(n.id)) return;
+    const kidCount = getChildren(n.id).length;
+    const isOpen = query ? true : !collapsed.has(n.id);
+    const descCount = getDescendants(n.id).length;
+
+    const chevron = kidCount
+      ? el('span', {
+          class: 'sb-item-chevron' + (isOpen ? ' open' : ''),
+          onclick: (e) => { e.stopPropagation(); toggleCollapse(n.id); },
+        }, '▸')
+      : el('span', { class: 'sb-item-chevron spacer' });
+
     const item = el('div', {
       class: 'sb-item' + (n.id === activeId ? ' active' : ''),
       style: { paddingLeft: (12 + depth * 14) + 'px' },
       onclick: () => openTab(n.id),
     }, [
+      chevron,
       el('div', { class: 'sb-item-dot', style: { background: n.color || '#6F00FF' } }),
       el('span', { class: 'sb-item-type' }, TYPE_BADGE[n.type || 'note'] || 'N'),
       el('span', {}, n.title || 'Untitled'),
-    ]);
+      descCount ? el('span', { class: 'sb-item-count' }, String(descCount)) : null,
+    ].filter(Boolean));
+
     item.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -63,6 +139,7 @@ export function renderList() {
           const v = prompt('Rename', n.title || '');
           if (v && v.trim() && v.trim() !== n.title) { updateNote(n.id, { title: v.trim() }).then(renderList); }
         } },
+        { label: 'Duplicate', onClick: () => duplicateNote(n) },
         { label: 'Delete', danger: true, onClick: () => {
           if (!confirm(`Delete "${n.title || 'Untitled'}"? Child nodes will be unlinked.`)) return;
           deleteNote(n.id).then(() => {
@@ -76,21 +153,42 @@ export function renderList() {
       ]), e.clientX, e.clientY);
     });
     list.appendChild(item);
-    for (const child of getChildren(n.id)) renderNode(child, depth + 1);
+    if (kidCount && isOpen) {
+      for (const child of sortNodes(getChildren(n.id), sortMode)) renderNode(child, depth + 1);
+    }
   };
-  const subjects = getNotes().filter(n => (n.type || 'note') === 'subject')
-    .sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+
+  const subjects = sortNodes(getNotes().filter(n => (n.type || 'note') === 'subject'), sortMode);
   for (const s of subjects) renderNode(s, 0);
   // Safety net: anything without a parent that isn't itself a Subject
   // (shouldn't normally happen once migrateNotesToHierarchy has run).
   const orphans = getNotes().filter(n => !n.parent_id && (n.type || 'note') !== 'subject');
   for (const o of orphans) renderNode(o, 0);
 
+  if (query && visibleIds && visibleIds.size === 0) {
+    list.appendChild(el('div', { class: 'empty-state' }, `No notes matching "${sidebarFilter.trim()}"`));
+  }
+
   $('#stat-notes').textContent = String(getNotes().length);
   const linkCount = getNoteLinks().length;
   const linkStat = $('.sb-stat:nth-child(2) .sb-stat-num');
   if (linkStat) linkStat.textContent = String(linkCount);
   renderProgress();
+}
+
+async function duplicateNote(n) {
+  const copy = await createNote({
+    type: n.type,
+    parent_id: n.parent_id,
+    title: (n.title || 'Untitled') + ' (copy)',
+    subject: n.subject,
+    body: n.body,
+    color: n.color,
+    tags: n.tags,
+  });
+  renderList();
+  openTab(copy.id);
+  toast(`Duplicated "${n.title || 'Untitled'}"`);
 }
 
 function renderProgress() {
@@ -264,6 +362,8 @@ function renderEditor() {
 
   const metaChildren = [
     el('span', {}, formatDate(note.updated_at || note.created_at)),
+    el('span', { class: 'note-word-count' }, wordCount(note.body || '')),
+    el('span', { class: 'note-save-status' }, 'Saved'),
     el('div', { class: 'note-tags-row' }, [...tags, addTagInput]),
     typeSel,
   ];
@@ -313,18 +413,26 @@ function renderEditor() {
 
 function scheduleSave(patch) {
   if (!activeId) return;
+  const status = document.querySelector('.note-save-status');
+  if (status) { status.textContent = 'Saving…'; status.classList.add('saving'); }
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     await updateNote(activeId, patch);
     renderList();
     if ('title' in patch) renderTabs();
+    const status2 = document.querySelector('.note-save-status');
+    if (status2) { status2.textContent = 'Saved'; status2.classList.remove('saving'); }
   }, 400);
 }
 
 function onEditorInput(e) {
   const t = e.target;
   if (t.classList.contains('note-title')) scheduleSave({ title: t.textContent.trim() || 'Untitled' });
-  if (t.classList.contains('note-body')) scheduleSave({ body: t.value });
+  if (t.classList.contains('note-body')) {
+    scheduleSave({ body: t.value });
+    const wc = document.querySelector('.note-word-count');
+    if (wc) wc.textContent = wordCount(t.value);
+  }
 }
 
 function onEditorClick(e) {
@@ -358,4 +466,6 @@ export async function addNote() {
   const note = await createNote({ title: 'New Note', body: '## New Note\n\nStart writing. Use [[Other Note]] to link.', subject: 'General' });
   renderList();
   openTab(note.id);
+  // AI auto-suggest siblings after sidebar note creation
+  triggerAutoSuggest(note);
 }

@@ -46,6 +46,11 @@ function loadCache() {
 // before graph_objects (Title/Outline canvas annotations) existed.
 function migrateCacheShape() {
   if (!cache.graph_objects) cache.graph_objects = [];
+  if (!cache.settings) cache.settings = defaultSettings();
+  // Backfill sidebar customization opts for settings saved before this existed.
+  if (!cache.settings.sidebarOpts) {
+    cache.settings.sidebarOpts = { width: 200, sort: 'name', showProgress: true, showExam: true, compact: false };
+  }
   if (!cache.notes) return;
   for (const n of cache.notes) {
     if (!NODE_TYPES.includes(n.type)) n.type = 'note';
@@ -149,6 +154,7 @@ function defaultSettings() {
     aiOpts: { autoAnalyze: true, showQuiz: true, examCountdown: true },
     addons: { pomodoro: false, spacedRep: true, examSim: false, mindMap: true },
     examDate: '',
+    sidebarOpts: { width: 200, sort: 'name', showProgress: true, showExam: true, compact: false },
   };
 }
 

@@ -50,6 +50,7 @@ async function bootstrap() {
   bindAiPanel();
   bindAuthButtons();
   bindAddNote();
+  bindSidebarResize();
   initSearch(openTab);
 
   // Let any module pre-fill the AI input (e.g. "Chat about this note" button).
@@ -196,6 +197,20 @@ function bindSettings() {
     lightToggle.addEventListener('click', () => applyTheme(!document.documentElement.classList.contains('light')));
   }
 
+  // Sidebar customization
+  tog('tog-sb-progress', v => { updateSettings({ sidebarOpts: { ...getSettings().sidebarOpts, showProgress: v } }); applySidebarVisibility(); });
+  tog('tog-sb-exam', v => { updateSettings({ sidebarOpts: { ...getSettings().sidebarOpts, showExam: v } }); applySidebarVisibility(); });
+  tog('tog-sb-compact', v => { updateSettings({ sidebarOpts: { ...getSettings().sidebarOpts, compact: v } }); $('#sidebar')?.classList.toggle('sidebar-compact', v); });
+  $('#sidebar-sort-select')?.addEventListener('change', e => {
+    updateSettings({ sidebarOpts: { ...getSettings().sidebarOpts, sort: e.target.value } });
+    renderList();
+  });
+  $('#sidebar-width-slider')?.addEventListener('input', e => {
+    const v = parseInt(e.target.value, 10);
+    setSidebarWidth(v);
+    updateSettings({ sidebarOpts: { ...getSettings().sidebarOpts, width: v } });
+  });
+
   $('#graph-node-size')?.addEventListener('input', e => { const v = parseInt(e.target.value, 10); setOpts({ nodeSize: v }); updateSettings({ graphOpts: { ...getSettings().graphOpts, nodeSize: v } }); startGraph(); });
   $('#graph-link-strength')?.addEventListener('input', e => { const v = parseInt(e.target.value, 10); setOpts({ linkStrength: v }); updateSettings({ graphOpts: { ...getSettings().graphOpts, linkStrength: v } }); startGraph(); });
 
@@ -218,12 +233,64 @@ function applySettingsToUi(s) {
   if (s.fontFamily) $('#font-family-select').value = s.fontFamily, $('#editor-content').style.fontFamily = s.fontFamily;
   if (s.graphOpts) setOpts(s.graphOpts);
   if (s.examDate) { $('#exam-date-input').value = s.examDate; updateExamCountdown(); }
+
+  // Sidebar customization
+  const sb = s.sidebarOpts || {};
+  setSidebarWidth(sb.width || 200);
+  $('#sidebar')?.classList.toggle('sidebar-compact', !!sb.compact);
+  if ($('#sidebar-sort-select')) $('#sidebar-sort-select').value = sb.sort || 'name';
+  applySidebarVisibility();
+
   // Init toggles from opts
   const t = (id, v) => { const e = $('#' + id); if (e) e.classList.toggle('on', !!v); };
   t('tog-labels', s.graphOpts?.labels);
   t('tog-auto', s.aiOpts?.autoAnalyze);
   t('tog-quiz', s.aiOpts?.showQuiz);
   t('tog-exam', s.aiOpts?.examCountdown);
+  t('tog-sb-progress', sb.showProgress !== false);
+  t('tog-sb-exam', sb.showExam !== false);
+  t('tog-sb-compact', !!sb.compact);
+}
+
+// ── Sidebar width + resize handle + section visibility ─────────
+function setSidebarWidth(px) {
+  const w = Math.min(340, Math.max(160, px));
+  const sb = $('#sidebar');
+  if (sb) sb.style.width = w + 'px';
+  const slider = $('#sidebar-width-slider');
+  if (slider && parseInt(slider.value, 10) !== w) slider.value = w;
+}
+
+function applySidebarVisibility() {
+  const opts = getSettings().sidebarOpts || {};
+  const showProgress = opts.showProgress !== false;
+  const showExam = opts.showExam !== false;
+  const progressBlock = $('#sidebar-progress-block'), progressDivider = $('#sidebar-progress-divider');
+  const examBlock = $('#sidebar-exam-block'), examDivider = $('#sidebar-exam-divider');
+  if (progressBlock) progressBlock.style.display = showProgress ? '' : 'none';
+  if (progressDivider) progressDivider.style.display = showProgress ? '' : 'none';
+  if (examBlock) examBlock.style.display = showExam ? '' : 'none';
+  if (examDivider) examDivider.style.display = showExam ? '' : 'none';
+}
+
+function bindSidebarResize() {
+  const handle = $('#sidebar-resize-handle');
+  const sb = $('#sidebar');
+  if (!handle || !sb) return;
+  let dragging = false;
+  handle.addEventListener('mousedown', (e) => { dragging = true; handle.classList.add('dragging'); e.preventDefault(); });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const rect = sb.getBoundingClientRect();
+    setSidebarWidth(e.clientX - rect.left);
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    const w = parseInt(sb.style.width, 10) || 200;
+    updateSettings({ sidebarOpts: { ...getSettings().sidebarOpts, width: w } });
+  });
 }
 
 function updateExamCountdown() {

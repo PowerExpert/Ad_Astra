@@ -93,6 +93,23 @@
         </div>
       </div>
       <div class="set-section">
+        <div class="set-section-title">Sidebar</div>
+        <div class="set-row"><div class="set-label">Show progress bars</div><div class="set-toggle on" id="tog-sb-progress"><div class="set-toggle-knob"></div></div></div>
+        <div class="set-row"><div class="set-label">Show exam countdown</div><div class="set-toggle on" id="tog-sb-exam"><div class="set-toggle-knob"></div></div></div>
+        <div class="set-row"><div class="set-label">Compact rows</div><div class="set-toggle" id="tog-sb-compact"><div class="set-toggle-knob"></div></div></div>
+        <div style="margin-top:10px;" class="set-row">
+          <div class="set-label">Sort by</div>
+          <select id="sidebar-sort-select" class="set-select">
+            <option value="name">Name (A–Z)</option>
+            <option value="updated">Recently updated</option>
+          </select>
+        </div>
+        <div style="margin-top:12px;">
+          <div class="set-label" style="font-size:12px;margin-bottom:4px;">Sidebar width</div>
+          <input type="range" id="sidebar-width-slider" class="set-slider" min="160" max="340" value="200">
+        </div>
+      </div>
+      <div class="set-section">
         <div class="set-section-title">Graph</div>
         <div class="set-row"><div class="set-label">Show labels</div><div class="set-toggle on" id="tog-labels"><div class="set-toggle-knob"></div></div></div>
         <div class="set-row"><div class="set-label">Node size</div></div>
@@ -117,14 +134,30 @@
 
       <!-- SIDEBAR -->
       <div id="sidebar">
-        <div class="sb-section">Vault <span class="sb-add" id="add-note-btn">+</span></div>
-        <div id="note-list"></div>
-        <div class="sb-divider"></div>
-        <div class="sb-section">Progress</div>
-        <div id="subject-progress"></div>
-        <div class="sb-divider"></div>
-        <div class="sb-section">Exam</div>
-        <div id="exam-countdown" style="padding:0 12px 4px;font-size:11px;color:var(--text-dim);">No exam date set</div>
+        <div class="sb-section">
+          Vault
+          <div class="sb-section-actions">
+            <span class="sb-icon-btn" id="btn-collapse-all" title="Collapse all">⊟</span>
+            <span class="sb-icon-btn" id="btn-expand-all" title="Expand all">⊞</span>
+            <span class="sb-add" id="add-note-btn" title="New note">+</span>
+          </div>
+        </div>
+        <div class="sb-filter-row">
+          <input type="text" id="sidebar-filter-input" class="sb-filter-input" placeholder="Filter vault…" />
+        </div>
+        <div id="sidebar-scroll" class="sidebar-scroll">
+          <div id="note-list"></div>
+          <div class="sb-divider" id="sidebar-progress-divider"></div>
+          <div id="sidebar-progress-block">
+            <div class="sb-section">Progress</div>
+            <div id="subject-progress"></div>
+          </div>
+          <div class="sb-divider" id="sidebar-exam-divider"></div>
+          <div id="sidebar-exam-block">
+            <div class="sb-section">Exam</div>
+            <div id="exam-countdown" style="padding:0 12px 4px;font-size:11px;color:var(--text-dim);">No exam date set</div>
+          </div>
+        </div>
         <div class="sb-divider"></div>
         <div class="sb-bottom">
           <div class="sb-stats">
@@ -133,6 +166,7 @@
             <div class="sb-stat"><div class="sb-stat-num" id="stat-tests">0</div><div class="sb-stat-label">tests</div></div>
           </div>
         </div>
+        <div class="sidebar-resize-handle" id="sidebar-resize-handle" title="Drag to resize"></div>
       </div>
 
       <!-- EDITOR VIEW -->
@@ -234,6 +268,7 @@
   <script type="module" src="config.js"></script>
   <script type="module" src="storage.js"></script>
   <script type="module" src="ui.js"></script>
+  <script type="module" src="ai-suggest.js"></script>
   <script type="module" src="notes.js"></script>
   <script type="module" src="graph.js"></script>
   <script type="module" src="ai.js"></script>
