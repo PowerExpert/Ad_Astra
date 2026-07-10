@@ -176,12 +176,24 @@ export async function initStorage() {
       supabase = mod.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey, {
         auth: { persistSession: true, autoRefreshToken: true },
       });
-      const { data } = await supabase.auth.getSession();
+      // getSession() can hang indefinitely if the Supabase project is
+      // unreachable (paused, deleted, DNS failure, offline, etc.) — it may
+      // try to refresh a stored token over the network with no timeout of
+      // its own. Race it against a hard timeout so app boot never freezes;
+      // worst case we just fall back to local mode a few seconds late.
+      const { data } = await Promise.race([
+        supabase.auth.getSession(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Supabase getSession timed out')), 4000)),
+      ]);
       currentUser = data.session?.user || null;
       if (currentUser) await pullAll();
       return { mode: 'supabase', user: getCurrentUser() };
     } catch (err) {
       console.warn('Supabase init failed, falling back to local mode.', err);
+      // Kill the background auto-refresh loop too, otherwise it keeps
+      // retrying against the unreachable host forever and spams the
+      // console even after we've already fallen back to local mode.
+      try { supabase?.auth.stopAutoRefresh?.(); } catch {}
       supabase = null;
     }
   }
