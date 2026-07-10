@@ -14,6 +14,7 @@ import {
   getNotes, getNote, getNoteLinks, createNote, updateNote, deleteNote,
   createManualLink, updateLink, deleteLink, getChildren, validParentTypesFor,
   getGraphObjects, createGraphObject, updateGraphObject, deleteGraphObject,
+  importData,
 } from './storage.js';
 import { el, $, clear, toast, openContextMenu, closeContextMenu, contextMenuItems } from './ui.js';
 import { renderList, registerTabSilent } from './notes.js';
@@ -38,6 +39,13 @@ let openNoteCallback = null;
 // Pan drag (drag on empty canvas space)
 let panDragging    = false;
 let panDragStart   = null;   // { sx, sy, px, py }
+
+// Right-click-drag camera pan. Armed on right mousedown; becomes an actual
+// pan once the pointer moves past a small threshold. If it never moves,
+// mouseup is followed by the browser's 'contextmenu' event as normal, so a
+// plain right-click still opens the existing context menus below.
+let rightPanStart  = null;   // { sx, sy, px, py }
+let rightPanMoved  = false;
 
 // Node drag
 let draggedNodeId  = null;
@@ -82,6 +90,11 @@ let groupDragStart    = null;   // { wx, wy }
 let groupDragLive     = null;   // { dx, dy }
 // Snapshot of positions/coords at drag start (so we compute clean deltas)
 let groupDragSnapshot = null;   // { [id]: {x,y} | {x1,y1,x2,y2} }
+
+// ── Copy/paste clipboard ──────────────────────────────────────
+// Holds a snapshot of copied nodes/objects, positions stored relative to
+// the selection's center so the whole clump keeps its shape on paste.
+let clipboard = null; // { anchor:{x,y}, notes:[...], links:[...], objects:[...] }
 
 // Connect mode
 let connectSourceId   = null;
@@ -135,6 +148,7 @@ export function startGraph() {
   rebuildPositions(canvas.width, canvas.height);
   bindInteraction(canvas);
   bindResize(canvas, container);
+  ensureGraphToolbar(container);
   if (animFrame) cancelAnimationFrame(animFrame);
   t = 0;
   const ctx = canvas.getContext('2d');
@@ -437,6 +451,7 @@ export function startGraph() {
     const canvas2 = $('#graph-canvas');
     if (canvas2) {
       if (panDragging)   canvas2.style.cursor = 'grabbing';
+      else if (rightPanStart && rightPanMoved) canvas2.style.cursor = 'grabbing';
       else if (groupDragging) canvas2.style.cursor = 'grabbing';
       else if (rubberBandLive)    canvas2.style.cursor = 'crosshair';
       else if (spaceHeld) canvas2.style.cursor = 'grab';
@@ -461,6 +476,8 @@ export function stopGraph() {
   clearSelection();
   rubberBand = null;
   rubberBandLive = null;
+  rightPanStart = null;
+  rightPanMoved = false;
 }
 
 // ── Node geometry ─────────────────────────────────────────────
@@ -601,9 +618,19 @@ function bindInteraction(canvas) {
   }, { passive: false });
 
   canvas.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+
+    // Right mouse button: arm a potential camera pan. If the pointer moves
+    // before mouseup this becomes a pan; if it doesn't, mouseup is followed
+    // by 'contextmenu' as usual and the normal right-click menus still open.
+    if (e.button === 2) {
+      rightPanStart = { sx, sy, px: pan.x, py: pan.y };
+      rightPanMoved = false;
+      return;
+    }
+
+    if (e.button !== 0) return;
     const { x: wx, y: wy } = toWorld(sx, sy);
     const nodes = currentNodes();
 
@@ -734,6 +761,16 @@ function bindInteraction(canvas) {
     mouseWorld.x = w.x;
     mouseWorld.y = w.y;
 
+    // ── Right-drag camera pan ──────────────────────────────────
+    if (rightPanStart) {
+      const dx = sx - rightPanStart.sx, dy = sy - rightPanStart.sy;
+      if (!rightPanMoved && Math.hypot(dx, dy) > 4) rightPanMoved = true;
+      if (rightPanMoved) {
+        pan.x = rightPanStart.px + dx;
+        pan.y = rightPanStart.py + dy;
+      }
+    }
+
     if (panDragging && panDragStart) {
       pan.x = panDragStart.px + (sx - panDragStart.sx);
       pan.y = panDragStart.py + (sy - panDragStart.sy);
@@ -793,7 +830,7 @@ function bindInteraction(canvas) {
 
     // ── Hover tooltip ─────────────────────────────────────────
     // Skip while any drag is active — tooltip would just flicker.
-    if (!panDragging && !draggedNodeId && !draggedTitleId && !draggedOutlineId && !rubberBand && !groupDragging) {
+    if (!panDragging && !rightPanStart && !draggedNodeId && !draggedTitleId && !draggedOutlineId && !rubberBand && !groupDragging) {
       const hoverHit = currentNodes().find(n => Math.hypot(n.x - w.x, n.y - w.y) < hitRadius(n));
       if (hoverHit) {
         clearTimeout(hoverGrace);
@@ -825,6 +862,15 @@ function bindInteraction(canvas) {
   });
 
   window.addEventListener('mouseup', (e) => {
+    // ── Right-drag camera pan release ──────────────────────────
+    // Note: rightPanMoved is intentionally left as-is here — the
+    // 'contextmenu' event that follows for the right button reads it to
+    // decide whether to suppress the menu, then resets it itself.
+    if (rightPanStart) {
+      if (rightPanMoved) savePanZoom();
+      rightPanStart = null;
+    }
+
     // ── Rubber-band finalise ──────────────────────────────────
     if (rubberBand) {
       if (rubberBandLive) {
@@ -894,6 +940,12 @@ function bindInteraction(canvas) {
 
   canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
+
+    // If the right button was just used to pan the camera, this is the
+    // trailing 'contextmenu' event for that gesture — swallow it so the
+    // menu doesn't pop up after a drag, then reset for the next right-click.
+    if (rightPanMoved) { rightPanMoved = false; return; }
+
     const rect  = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
     const { x: wx, y: wy } = toWorld(sx, sy);
@@ -925,13 +977,23 @@ function bindInteraction(canvas) {
     showCanvasContextMenu(wx, wy, e.clientX, e.clientY);
   });
 
-  // ── Delete key removes selection ──────────────────────────
+  // ── Delete key removes selection; Ctrl+C/Ctrl+V copy & paste ──
   canvas.addEventListener('keydown', (e) => {
     if ((e.key === 'Delete' || e.key === 'Backspace') && selection.size > 0) {
       e.preventDefault();
       deleteSelection();
     }
     if (e.key === 'Escape') clearSelection();
+
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && e.key.toLowerCase() === 'c' && selection.size > 0) {
+      e.preventDefault();
+      copyNodesToClipboard(selection);
+    }
+    if (ctrl && e.key.toLowerCase() === 'v' && clipboard) {
+      e.preventDefault();
+      pasteClipboardAt(mouseWorld.x, mouseWorld.y);
+    }
   });
   // The canvas needs tabIndex to receive keydown
   if (!canvas.hasAttribute('tabindex')) canvas.setAttribute('tabindex', '0');
@@ -958,7 +1020,7 @@ function ensureHint(container) {
   const old = container.querySelector('.graph-hint');
   if (old) old.remove();
   container.appendChild(el('div', { class: 'graph-hint' },
-    'Scroll to zoom · Space+drag to pan · drag empty space to select · right-click to add nodes'));
+    'Scroll to zoom · Space+drag or right-click-drag to pan · drag empty space to select · right-click to add nodes'));
 }
 
 // ── Node hover tooltip ────────────────────────────────────────
@@ -1196,10 +1258,135 @@ async function deleteSelection() {
 
 function showSelectionContextMenu(clientX, clientY) {
   openContextMenu(contextMenuItems(`${selection.size} objects selected`, [
+    { label: `Copy all ${selection.size}`, onClick: () => copyNodesToClipboard(selection) },
     { label: 'Move together (drag any)', onClick: () => {} },
     { label: 'Deselect all', onClick: () => clearSelection() },
     { label: `Delete all ${selection.size}`, danger: true, onClick: () => deleteSelection() },
   ]), clientX, clientY);
+}
+
+// ── Copy / paste ───────────────────────────────────────────────
+// Copies whatever's in `ids` (nodes and/or graph objects) into an
+// in-memory clipboard. Positions are stored as deltas from the group's
+// center so pasting reproduces the same relative layout anywhere.
+function copyNodesToClipboard(ids) {
+  const idSet = ids instanceof Set ? ids : new Set(ids);
+  if (!idSet.size) { toast('Nothing to copy'); return; }
+
+  const noteIds = new Set(getNotes().map(n => n.id));
+  const selectedNoteIds = [...idSet].filter(id => noteIds.has(id));
+  const selectedObjIds  = [...idSet].filter(id => !noteIds.has(id));
+  if (!selectedNoteIds.length && !selectedObjIds.length) { toast('Nothing to copy'); return; }
+
+  const pts = [];
+  const noteEntries = selectedNoteIds.map(id => {
+    const note = getNote(id);
+    const pos  = positions[id] || { x: 0, y: 0 };
+    pts.push(pos);
+    return { note, pos };
+  }).filter(e => e.note);
+
+  const objEntries = selectedObjIds.map(id => getGraphObjects().find(o => o.id === id)).filter(Boolean);
+  for (const o of objEntries) {
+    if (o.type === 'title' || o.type === 'sticky') pts.push({ x: o.x, y: o.y });
+    else if (o.type === 'outline' || o.type === 'line') pts.push({ x: (o.x1 + o.x2) / 2, y: (o.y1 + o.y2) / 2 });
+  }
+  if (!pts.length) { toast('Nothing to copy'); return; }
+
+  const anchor = {
+    x: pts.reduce((s, p) => s + p.x, 0) / pts.length,
+    y: pts.reduce((s, p) => s + p.y, 0) / pts.length,
+  };
+
+  // Only carry over manual links that are internal to the copied set —
+  // hierarchy links are reconstructed from parent_id on paste instead.
+  const noteIdSet = new Set(selectedNoteIds);
+  const links = getNoteLinks().filter(l => l.kind === 'manual' && noteIdSet.has(l.source) && noteIdSet.has(l.target));
+
+  clipboard = {
+    anchor,
+    notes: noteEntries.map(({ note, pos }) => ({
+      origId:    note.id,
+      type:      note.type || 'note',
+      title:     note.title,
+      body:      note.body,
+      color:     note.color,
+      tags:      note.tags,
+      subject:   note.subject,
+      parent_id: note.parent_id,
+      dx: pos.x - anchor.x,
+      dy: pos.y - anchor.y,
+    })),
+    links: links.map(l => ({ source: l.source, target: l.target, color: l.color })),
+    objects: objEntries.map(o => (
+      (o.type === 'title' || o.type === 'sticky')
+        ? { type: o.type, text: o.text, color: o.color, dx: o.x - anchor.x, dy: o.y - anchor.y }
+        : { type: o.type, color: o.color, dx1: o.x1 - anchor.x, dy1: o.y1 - anchor.y, dx2: o.x2 - anchor.x, dy2: o.y2 - anchor.y }
+    )),
+  };
+
+  const n = noteEntries.length, m = objEntries.length;
+  toast(`Copied ${n} node${n === 1 ? '' : 's'}${m ? ` + ${m} object${m === 1 ? '' : 's'}` : ''}`);
+}
+
+// Pastes the clipboard centered at world-space (wx, wy). New notes get
+// fresh ids; internal parent/child relationships and manual links are
+// reconstructed via an origId → newId map. If a copied node's parent
+// wasn't itself copied, the new node re-attaches to that same original
+// parent (if still a valid type) rather than becoming a root node.
+async function pasteClipboardAt(wx, wy) {
+  if (!clipboard) { toast('Clipboard is empty'); return; }
+  const idMap = {};
+  const created = [];
+
+  for (const nd of clipboard.notes) {
+    const newNote = await createNote({
+      type:      nd.type,
+      parent_id: null,
+      title:     nd.title,
+      subject:   nd.subject,
+      body:      nd.body,
+      color:     nd.color,
+      tags:      nd.tags,
+    });
+    idMap[nd.origId] = newNote.id;
+    positions[newNote.id] = { x: wx + nd.dx, y: wy + nd.dy };
+    created.push({ nd, newNote });
+  }
+
+  for (const { nd, newNote } of created) {
+    let newParentId = null;
+    if (nd.parent_id && idMap[nd.parent_id]) {
+      newParentId = idMap[nd.parent_id]; // parent was copied too → re-link to its copy
+    } else if (nd.parent_id) {
+      const extParent = getNote(nd.parent_id);
+      if (extParent && validParentTypesFor(newNote.type).includes(extParent.type || 'note')) {
+        newParentId = nd.parent_id; // parent wasn't copied → re-attach to the original
+      }
+    }
+    if (newParentId) await updateNote(newNote.id, { parent_id: newParentId });
+  }
+
+  for (const l of clipboard.links) {
+    const a = idMap[l.source], b = idMap[l.target];
+    if (a && b) await createManualLink(a, b, l.color);
+  }
+
+  for (const od of clipboard.objects) {
+    if (od.type === 'title' || od.type === 'sticky') {
+      await createGraphObject({ type: od.type, text: od.text, color: od.color, x: wx + od.dx, y: wy + od.dy });
+    } else {
+      await createGraphObject({ type: od.type, color: od.color, x1: wx + od.dx1, y1: wy + od.dy1, x2: wx + od.dx2, y2: wy + od.dy2 });
+    }
+  }
+
+  savePositions();
+  renderList();
+
+  clearSelection();
+  for (const { newNote } of created) selection.add(newNote.id);
+
+  toast(`Pasted ${created.length} node${created.length === 1 ? '' : 's'}`);
 }
 
 // ── Context menus ─────────────────────────────────────────────
@@ -1209,6 +1396,7 @@ function showCanvasContextMenu(wx, wy, clientX, clientY) {
   const section = (label) => el('div', { class: 'ctx-menu-section' }, label);
   const item = (label, fn) => el('div', { class: 'ctx-menu-item', onclick: () => { closeContextMenu(); fn(); } }, label);
   const menu = el('div', { class: 'ctx-menu' }, [
+    ...(clipboard ? [section('Clipboard'), item('Paste', () => pasteClipboardAt(wx, wy))] : []),
     section('Nodes'),
     ...['subject','topic','subtopic','note'].map(ty => item('+ ' + capitalize(ty), () => openCreateNodeModal(ty, wx, wy))),
     section('Objects'),
@@ -1223,6 +1411,7 @@ function showCanvasContextMenu(wx, wy, clientX, clientY) {
 function showNodeContextMenu(node, clientX, clientY) {
   openContextMenu(contextMenuItems(`${node.label} · ${node.type}`, [
     { label: 'Open',       onClick: () => openNoteCallback?.(node.id) },
+    { label: 'Copy',       onClick: () => copyNodesToClipboard([node.id]) },
     { label: 'Connect to…',onClick: () => armConnectMode(node.id) },
     { label: 'Rename',     onClick: () => {
       const v = prompt('Rename node', node.label);
@@ -1477,5 +1666,127 @@ function loadPanZoom() {
     const r = localStorage.getItem(VIEW_KEY);
     if (r) { const v = JSON.parse(r); pan = v.pan || { x: 0, y: 0 }; zoom = v.zoom || 1; }
   } catch {}
+}
+
+// ── Export / Import graph data ──────────────────────────────────
+// "Extract" = download everything that makes up the graph as one JSON
+// file: every node (with its type/parent assignment, i.e. the hierarchy),
+// manual + wikilink connections, canvas objects (titles/outlines/stickies/
+// lines), and each node's x/y placement on the canvas.
+// "Input" = load that same JSON back in, replacing the current vault's
+// notes/links/graph objects and restoring the saved layout. Materials,
+// tests, and flashcards are untouched either way — this is graph data.
+const TOOLBAR_BTN_STYLE = {
+  padding: '6px 12px',
+  borderRadius: '6px',
+  border: '1px solid var(--border)',
+  background: 'var(--panel)',
+  color: 'var(--text)',
+  fontSize: '11.5px',
+  fontWeight: '600',
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+  whiteSpace: 'nowrap',
+};
+
+function ensureGraphToolbar(container) {
+  if (container.querySelector('.graph-io-toolbar')) return;
+
+  const cs = getComputedStyle(container);
+  if (cs.position === 'static') container.style.position = 'relative';
+
+  const fileInput = el('input', {
+    type: 'file',
+    accept: 'application/json',
+    style: { display: 'none' },
+    onchange: async (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (file) await importGraphData(file);
+    },
+  });
+
+  const bar = el('div', {
+    class: 'graph-io-toolbar',
+    style: {
+      position: 'absolute', top: '12px', right: '12px', zIndex: '30',
+      display: 'flex', gap: '6px',
+    },
+  }, [
+    el('button', { style: TOOLBAR_BTN_STYLE, title: 'Download the graph as JSON', onclick: exportGraphData }, '⬇ Export graph'),
+    el('button', { style: TOOLBAR_BTN_STYLE, title: 'Load a previously exported JSON file', onclick: () => fileInput.click() }, '⬆ Import graph'),
+    fileInput,
+  ]);
+
+  container.appendChild(bar);
+}
+
+function exportGraphData() {
+  const payload = {
+    kind: 'ad-astra-graph',
+    version: 1,
+    exported_at: new Date().toISOString(),
+    notes: getNotes(),
+    note_links: getNoteLinks(),
+    graph_objects: getGraphObjects(),
+    positions,
+    view: { pan, zoom },
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `ad-astra-graph-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast('Graph exported');
+}
+
+async function importGraphData(file) {
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch {
+    toast('That file is not valid JSON');
+    return;
+  }
+  if (!data || !Array.isArray(data.notes)) {
+    toast('That file doesn\'t look like an Ad Astra graph export');
+    return;
+  }
+  const count = data.notes.length;
+  const ok = confirm(
+    `Import ${count} node${count === 1 ? '' : 's'} from this file?\n\n` +
+    `This REPLACES all current notes, connections, and canvas objects — ` +
+    `materials, tests, and flashcards are kept. This can't be undone.`
+  );
+  if (!ok) return;
+
+  await importData({
+    notes: data.notes,
+    note_links: data.note_links,
+    graph_objects: data.graph_objects,
+  });
+
+  if (data.positions && typeof data.positions === 'object') {
+    positions = { ...data.positions };
+  }
+  if (data.view?.pan) pan = data.view.pan;
+  if (typeof data.view?.zoom === 'number') zoom = data.view.zoom;
+
+  const canvas = $('#graph-canvas');
+  if (canvas) rebuildPositions(canvas.width, canvas.height); // fills gaps, drops stale ids
+  savePositions();
+  savePanZoom();
+
+  cancelConnectMode();
+  cancelOutlinePlacement();
+  cancelLinePlacement();
+  clearSelection();
+
+  renderList();
+  toast(`Imported ${count} node${count === 1 ? '' : 's'}`);
 }
 loadPositions();

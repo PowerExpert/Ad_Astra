@@ -603,6 +603,74 @@ export async function updateSettings(patch) {
   }
 }
 
+// ── Bulk export / import ────────────────────────────────────
+// Full-vault backup: every collection, as-is. Used for a complete export;
+// callers that only want the graph (notes/links/graph_objects) can just
+// pick the fields they need off the result.
+export function exportData() {
+  return {
+    version: 1,
+    exported_at: new Date().toISOString(),
+    notes: cache.notes,
+    note_links: cache.note_links,
+    graph_objects: cache.graph_objects,
+    materials: cache.materials,
+    tests: cache.tests,
+    flashcards: cache.flashcards,
+  };
+}
+
+// Replaces whichever collections are present (as arrays) in `payload`,
+// leaving any collection payload doesn't mention untouched — so an import
+// of just { notes, note_links, graph_objects } (a "graph" export) leaves
+// materials/tests/flashcards exactly as they were. Persists locally, and
+// best-effort mirrors the change to Supabase when signed in.
+export async function importData(payload) {
+  if (!payload || typeof payload !== 'object') throw new Error('Invalid import payload');
+  const uid = getCurrentUser().id;
+  const stamp = (rows) => (Array.isArray(rows) ? rows.map(r => ({ ...r, user_id: r.user_id || uid })) : null);
+
+  const next = {
+    notes:         stamp(payload.notes),
+    note_links:    stamp(payload.note_links),
+    graph_objects: stamp(payload.graph_objects),
+    materials:     stamp(payload.materials),
+    tests:         stamp(payload.tests),
+    flashcards:    stamp(payload.flashcards),
+  };
+
+  for (const [key, rows] of Object.entries(next)) {
+    if (rows) cache[key] = rows;
+  }
+
+  migrateCacheShape();
+  saveCache();
+
+  if (supabase && currentUser) {
+    const pushReplace = async (table, rows) => {
+      if (!rows) return;
+      try {
+        await supabase.from(table).delete().eq('user_id', uid);
+        if (rows.length) await supabase.from(table).insert(rows);
+      } catch (err) { console.warn(`import replace ${table} failed`, err); }
+    };
+    await Promise.all([
+      pushReplace('notes', next.notes),
+      pushReplace('note_links', next.note_links),
+      pushReplace('graph_objects', next.graph_objects),
+      pushReplace('materials', next.materials),
+      pushReplace('tests', next.tests),
+      pushReplace('flashcards', next.flashcards),
+    ]);
+  }
+
+  return {
+    notes: next.notes?.length || 0,
+    note_links: next.note_links?.length || 0,
+    graph_objects: next.graph_objects?.length || 0,
+  };
+}
+
 // ── Supabase push helpers ───────────────────────────────────
 async function maybeUpsert(table, row) {
   if (!supabase || !currentUser) return;
