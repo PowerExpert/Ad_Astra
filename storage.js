@@ -10,7 +10,17 @@
 // graph connections drawn by the user (kind: 'manual').
 import { SUPABASE_CONFIG, APP_CONFIG } from './config.js';
 
-const LS_KEY = 'nexuslearn.v2';
+// Every page load resolves which project it belongs to via a tiny inline
+// script in <head> (see app.html) that sets window.__ADASTRA_PROJECT__
+// from the ?project=<id> URL param BEFORE this module evaluates. Each
+// project gets its own isolated localStorage vault: 'default' keeps the
+// original unsuffixed key so existing single-vault users aren't affected;
+// any other project id gets '.{'<id>'}' appended so projects never share
+// notes/links/graph data or bleed into each other.
+const PROJECT_ID    = (typeof window !== 'undefined' && window.__ADASTRA_PROJECT__) || 'default';
+const LS_KEY_BASE    = 'nexuslearn.v2';
+const LS_KEY         = PROJECT_ID === 'default' ? LS_KEY_BASE : `${LS_KEY_BASE}.${PROJECT_ID}`;
+const PROJECTS_KEY   = 'adastra.projects'; // shared registry read by index.html (the project hub)
 let supabase = null;
 let currentUser = null;
 let localMode = false;
@@ -37,7 +47,10 @@ function loadCache() {
       flashcards: [],
       settings: defaultSettings(),
     };
-    seedDemoData();
+    // Only the legacy single-vault ('default') project gets the sample
+    // Physics/Math starter notes on first run. Every new project created
+    // from the hub starts completely empty.
+    if (PROJECT_ID === 'default') seedDemoData();
   }
   migrateCacheShape();
 }
@@ -160,12 +173,41 @@ function defaultSettings() {
 
 function saveCache() {
   try { localStorage.setItem(LS_KEY, JSON.stringify(cache)); } catch {}
+  touchProjectMeta();
+}
+
+// Bumps this project's `updatedAt` in the shared registry (read by the
+// project hub / index.html) so "recently edited" ordering stays accurate.
+// Silently creates a registry entry if one doesn't exist yet — this keeps
+// legacy single-vault users (project id 'default') showing up on the hub
+// without needing a separate migration step.
+function touchProjectMeta() {
+  try {
+    const raw = localStorage.getItem(PROJECTS_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    const now = new Date().toISOString();
+    const idx = list.findIndex(p => p.id === PROJECT_ID);
+    if (idx !== -1) list[idx].updatedAt = now;
+    else list.push({ id: PROJECT_ID, name: PROJECT_ID === 'default' ? 'My Vault' : 'Untitled Project', color: '#6F00FF', createdAt: now, updatedAt: now });
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(list));
+  } catch {}
 }
 
 export function isLocalMode() { return localMode; }
 
 export function getCurrentUser() {
   return currentUser ? { id: currentUser.id, email: currentUser.email } : { id: APP_CONFIG.localUserId, email: 'local' };
+}
+
+// ── Project identity (used by app.js to label the topbar) ────────────
+export function getProjectId() { return PROJECT_ID; }
+export function getProjectMeta() {
+  try {
+    const list = JSON.parse(localStorage.getItem(PROJECTS_KEY) || '[]');
+    const found = list.find(p => p.id === PROJECT_ID);
+    if (found) return found;
+  } catch {}
+  return { id: PROJECT_ID, name: PROJECT_ID === 'default' ? 'My Vault' : 'Untitled Project' };
 }
 
 export async function initStorage() {

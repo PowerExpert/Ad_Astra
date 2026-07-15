@@ -39,17 +39,22 @@ function open() {
     placeholder: 'Search notes…',
     autocomplete: 'off',
     spellcheck: 'false',
+    role: 'combobox',
+    'aria-expanded': 'true',
+    'aria-controls': 'search-results-list',
+    'aria-autocomplete': 'list',
+    'aria-label': 'Search notes',
   });
 
-  const resultsList = el('div', { class: 'search-results' });
+  const resultsList = el('div', { class: 'search-results', id: 'search-results-list', role: 'listbox', 'aria-label': 'Search results' });
 
-  const modal = el('div', { class: 'search-modal' }, [
+  const modal = el('div', { class: 'search-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Search notes' }, [
     el('div', { class: 'search-input-row' }, [
-      el('span', { class: 'search-icon' }, [
+      el('span', { class: 'search-icon', 'aria-hidden': 'true' }, [
         svgSearch(),
       ]),
       input,
-      el('span', { class: 'search-esc-hint' }, 'Esc'),
+      el('span', { class: 'search-esc-hint', 'aria-hidden': 'true' }, 'Esc'),
     ]),
     resultsList,
   ]);
@@ -82,6 +87,7 @@ function close() {
   overlay = null;
   currentResults = [];
   selectedIdx = 0;
+  $('#btn-search')?.focus();
 }
 
 // ── Keyboard navigation ───────────────────────────────────────
@@ -93,8 +99,13 @@ function move(delta, list) {
 
 function updateSelection(list) {
   const items = list.querySelectorAll('.search-result');
-  items.forEach((item, i) => item.classList.toggle('selected', i === selectedIdx));
+  items.forEach((item, i) => {
+    item.classList.toggle('selected', i === selectedIdx);
+    item.setAttribute('aria-selected', i === selectedIdx ? 'true' : 'false');
+  });
   items[selectedIdx]?.scrollIntoView({ block: 'nearest' });
+  const input = document.querySelector('.search-input');
+  if (input && items[selectedIdx]) input.setAttribute('aria-activedescendant', items[selectedIdx].id);
 }
 
 function openSelected() {
@@ -181,7 +192,10 @@ function renderResults(query, list) {
     }
 
     const item = el('div', {
+      id: 'search-result-' + i,
       class: 'search-result' + (i === selectedIdx ? ' selected' : ''),
+      role: 'option',
+      'aria-selected': i === selectedIdx ? 'true' : 'false',
       onmouseenter: () => { selectedIdx = i; updateSelection(list); },
       onclick: () => { close(); openNoteCb(note.id); },
     }, children);

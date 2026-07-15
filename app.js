@@ -1,11 +1,11 @@
 // app.js — bootstrap, mode switch, settings wiring, auth UI, AI panel.
-import { initStorage, isLocalMode, getCurrentUser, onAuthChange, signIn, signUp, signOut, getSettings, updateSettings, getTests, getNotes, getNoteLinks } from './storage.js';
+import { initStorage, isLocalMode, getCurrentUser, onAuthChange, signIn, signUp, signOut, getSettings, updateSettings, getTests, getNotes, getNoteLinks, getProjectMeta } from './storage.js';
 import { initNotes, openTab, addNote, renderList, setModeSwitchCallback } from './notes.js';
 import { startGraph, stopGraph, setOpts, setOpenNoteCallback, bindGraphShortcuts } from './graph.js';
 import { aiChat } from './ai.js';
 import { initMaterials } from './materials.js';
 import { initTests, refreshTests } from './tests.js';
-import { el, $, $$, clear, formatDate, toast, daysUntil } from './ui.js';
+import { el, $, $$, clear, formatDate, toast, daysUntil, openModal } from './ui.js';
 import { AI_CONFIG } from './config.js';
 import { initSearch } from './search.js';
 
@@ -25,6 +25,15 @@ let graphRunning = false;
 
 window.__toggleSettings = function() { $('#settings-panel').classList.toggle('open'); };
 
+// The settings-panel close glyph is a <span role="button"> in app.html;
+// give it the same Enter/Space activation real buttons get for free.
+document.addEventListener('keydown', (e) => {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target?.classList?.contains('set-close')) {
+    e.preventDefault();
+    e.target.click();
+  }
+});
+
 document.addEventListener('click', (e) => {
   const panel = $('#settings-panel');
   const trigger = $('#btn-settings');
@@ -37,6 +46,12 @@ async function bootstrap() {
   await initStorage();
   const user = getCurrentUser();
   setAvatar(user);
+
+  const projectMeta = getProjectMeta();
+  document.title = `${projectMeta.name} — Ad Astra`;
+  const projectNameEl = $('#project-name');
+  if (projectNameEl) projectNameEl.textContent = projectMeta.name;
+  $('#btn-projects')?.addEventListener('click', () => { location.href = 'index.html'; });
 
   setModeSwitchCallback(() => setPrimary('notes'));
   initNotes();
@@ -158,17 +173,34 @@ function applyLayout() {
 }
 
 function bindSettings() {
-  $$('.set-color-swatch').forEach(sw => {
-    sw.addEventListener('click', () => {
-      $$('.set-color-swatch').forEach(s => s.classList.remove('selected'));
+  // Color swatches behave like a radio group: keyboard-focusable, arrow
+  // keys move between them, aria-checked reflects the current selection.
+  const swatches = $$('.set-color-swatch');
+  swatches.forEach((sw, i) => {
+    sw.setAttribute('role', 'radio');
+    sw.setAttribute('tabindex', sw.classList.contains('selected') ? '0' : '-1');
+    sw.setAttribute('aria-checked', sw.classList.contains('selected') ? 'true' : 'false');
+    sw.setAttribute('aria-label', 'Accent color ' + sw.dataset.accent);
+    const select = () => {
+      swatches.forEach(s => { s.classList.remove('selected'); s.setAttribute('aria-checked', 'false'); s.setAttribute('tabindex', '-1'); });
       sw.classList.add('selected');
+      sw.setAttribute('aria-checked', 'true');
+      sw.setAttribute('tabindex', '0');
       const c = sw.dataset.accent, b = sw.dataset.bright;
       document.documentElement.style.setProperty('--violet', c);
       document.documentElement.style.setProperty('--violet-bright', b);
       document.documentElement.style.setProperty('--violet-glow', c + '26');
       updateSettings({ accent: c, accentBright: b });
+    };
+    sw.addEventListener('click', select);
+    sw.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); }
+      else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); swatches[(i + 1) % swatches.length].focus(); }
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); swatches[(i - 1 + swatches.length) % swatches.length].focus(); }
     });
   });
+  $('.set-color-row')?.setAttribute('role', 'radiogroup');
+  $('.set-color-row')?.setAttribute('aria-label', 'Accent color');
   $('#font-size-slider')?.addEventListener('input', e => {
     const v = parseInt(e.target.value, 10);
     $('#editor-content').style.fontSize = v + 'px';
@@ -178,7 +210,27 @@ function bindSettings() {
     $('#editor-content').style.fontFamily = e.target.value;
     updateSettings({ fontFamily: e.target.value });
   });
-  const tog = (id, cb) => { const el = $('#' + id); el?.addEventListener('click', () => { cb(el.classList.toggle('on')); }); };
+  const tog = (id, cb) => {
+    const el = $('#' + id);
+    if (!el) return;
+    el.setAttribute('role', 'switch');
+    el.setAttribute('tabindex', '0');
+    el.setAttribute('aria-checked', el.classList.contains('on') ? 'true' : 'false');
+    const label = el.parentElement?.querySelector('.set-label');
+    if (label) {
+      if (!label.id) label.id = 'lbl-' + id;
+      el.setAttribute('aria-labelledby', label.id);
+    }
+    const fire = () => {
+      const on = el.classList.toggle('on');
+      el.setAttribute('aria-checked', on ? 'true' : 'false');
+      cb(on);
+    };
+    el.addEventListener('click', fire);
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fire(); }
+    });
+  };
   tog('tog-labels', v => { setOpts({ labels: v }); updateSettings({ graphOpts: { ...getSettings().graphOpts, labels: v } }); startGraph(); });
   tog('tog-auto', v => updateSettings({ aiOpts: { ...getSettings().aiOpts, autoAnalyze: v } }));
   tog('tog-quiz', v => updateSettings({ aiOpts: { ...getSettings().aiOpts, showQuiz: v } }));
@@ -190,11 +242,16 @@ function bindSettings() {
     const applyTheme = (light) => {
       document.documentElement.classList.toggle('light', light);
       lightToggle.classList.toggle('on', light);
+      lightToggle.setAttribute('aria-checked', light ? 'true' : 'false');
       localStorage.setItem('adastra.theme', light ? 'light' : 'dark');
     };
     // Restore from last session
     applyTheme(localStorage.getItem('adastra.theme') === 'light');
-    lightToggle.addEventListener('click', () => applyTheme(!document.documentElement.classList.contains('light')));
+    const toggleTheme = () => applyTheme(!document.documentElement.classList.contains('light'));
+    lightToggle.addEventListener('click', toggleTheme);
+    lightToggle.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleTheme(); }
+    });
   }
 
   // Sidebar customization
@@ -305,7 +362,13 @@ function updateExamCountdown() {
 }
 
 function bindAddNote() {
-  $('#add-note-btn')?.addEventListener('click', addNote);
+  const btn = $('#add-note-btn');
+  btn?.addEventListener('click', addNote);
+  if (btn) {
+    btn.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); addNote(); }
+    });
+  }
 }
 
 function bindAiPanel() {
@@ -403,38 +466,42 @@ function bindAuthButtons() {
 
 function renderAuthModal(visible) {
   const host = $('#auth-modal-host');
-  if (!visible) { host.innerHTML = ''; return; }
+  let closeModalFocus = null;
+  if (!visible) { closeModalFocus?.(); host.innerHTML = ''; return; }
   clear(host);
   const mode = { kind: 'signin' };
+  const titleId = 'auth-modal-title';
   const draw = () => {
     clear(host);
-    const email = el('input', { class: 'input', type: 'email', placeholder: 'Email' });
-    const pw = el('input', { class: 'input', type: 'password', placeholder: 'Password' });
+    const email = el('input', { class: 'input', type: 'email', placeholder: 'Email', 'aria-label': 'Email' });
+    const pw = el('input', { class: 'input', type: 'password', placeholder: 'Password', 'aria-label': 'Password' });
     const submit = el('button', { class: 'btn-primary' }, mode.kind === 'signin' ? 'Sign in' : 'Sign up');
     const switcher = el('button', { class: 'btn-ghost' }, mode.kind === 'signin' ? 'Need an account?' : 'Have an account?');
-    const err = el('div', { class: 'modal-sub' }, '');
-    const closeBtn = el('span', { class: 'modal-close', onclick: () => { host.innerHTML = ''; } }, '×');
+    const err = el('div', { class: 'modal-sub', role: 'alert' }, '');
+    const doClose = () => { closeModalFocus?.(); host.innerHTML = ''; };
+    const closeBtn = el('span', { class: 'modal-close', role: 'button', tabindex: '0', 'aria-label': 'Close dialog', onclick: doClose }, '×');
+    closeBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doClose(); } });
     submit.addEventListener('click', async () => {
       err.textContent = '';
       const r = mode.kind === 'signin' ? await signIn(email.value, pw.value) : await signUp(email.value, pw.value);
       if (r.error) err.textContent = r.error;
-      else { toast(mode.kind === 'signin' ? 'Signed in' : 'Check your email'); host.innerHTML = ''; }
+      else { toast(mode.kind === 'signin' ? 'Signed in' : 'Check your email'); doClose(); }
     });
     switcher.addEventListener('click', () => { mode.kind = mode.kind === 'signin' ? 'signup' : 'signin'; draw(); });
+    const modalBox = el('div', { class: 'modal' }, [
+      el('div', { class: 'modal-title-row' }, [
+        el('div', { class: 'modal-title', id: titleId }, 'Sign in to Ad Astra'),
+        closeBtn,
+      ]),
+      el('div', { class: 'modal-sub' }, 'Your notes and progress sync across devices.'),
+      email, pw, err, submit, switcher,
+    ]);
     const backdrop = el('div', {
       class: 'modal-backdrop',
-      onclick: (e) => { if (e.target === backdrop) host.innerHTML = ''; },
-    }, [
-      el('div', { class: 'modal' }, [
-        el('div', { class: 'modal-title-row' }, [
-          el('div', { class: 'modal-title' }, 'Sign in to Ad Astra'),
-          closeBtn,
-        ]),
-        el('div', { class: 'modal-sub' }, 'Your notes and progress sync across devices.'),
-        email, pw, err, submit, switcher,
-      ])
-    ]);
+      onclick: (e) => { if (e.target === backdrop) doClose(); },
+    }, [modalBox]);
     host.appendChild(backdrop);
+    closeModalFocus = openModal(backdrop, modalBox, { labelledBy: titleId, initialFocus: email, onClose: () => {} });
   };
   draw();
 }
@@ -452,34 +519,38 @@ function bindShortcutHelp() {
   ];
 
   let overlay = null;
+  let closeOverlayFocus = null;
+  const titleId = 'shortcut-modal-title';
 
   const show = () => {
     if (overlay) return;
-    overlay = el('div', { class: 'shortcut-overlay' }, [
-      el('div', { class: 'shortcut-modal' }, [
-        el('div', { class: 'shortcut-header' }, [
-          el('span', {}, 'Keyboard Shortcuts'),
-          el('span', { class: 'modal-close', onclick: hide }, '×'),
-        ]),
-        el('div', { class: 'shortcut-list' },
-          SHORTCUTS.map(s => el('div', { class: 'shortcut-row' }, [
-            el('span', { class: 'shortcut-keys' }, s.keys),
-            el('span', { class: 'shortcut-desc' }, s.desc),
-          ]))
-        ),
+    const closeBtn = el('span', { class: 'modal-close', role: 'button', tabindex: '0', 'aria-label': 'Close keyboard shortcuts' }, '×');
+    const modalBox = el('div', { class: 'shortcut-modal' }, [
+      el('div', { class: 'shortcut-header' }, [
+        el('span', { id: titleId }, 'Keyboard Shortcuts'),
+        closeBtn,
       ]),
+      el('div', { class: 'shortcut-list', role: 'list' },
+        SHORTCUTS.map(s => el('div', { class: 'shortcut-row', role: 'listitem' }, [
+          el('span', { class: 'shortcut-keys' }, s.keys),
+          el('span', { class: 'shortcut-desc' }, s.desc),
+        ]))
+      ),
     ]);
+    overlay = el('div', { class: 'shortcut-overlay' }, [modalBox]);
     overlay.addEventListener('mousedown', e => { if (e.target === overlay) hide(); });
+    closeBtn.addEventListener('click', hide);
+    closeBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); hide(); } });
     document.body.appendChild(overlay);
+    closeOverlayFocus = openModal(overlay, modalBox, { labelledBy: titleId, initialFocus: closeBtn, onClose: () => { overlay = null; } });
   };
 
-  const hide = () => { overlay?.remove(); overlay = null; };
+  const hide = () => { closeOverlayFocus?.(); };
 
   document.addEventListener('keydown', e => {
     const tag = document.activeElement?.tagName?.toLowerCase();
     const editing = tag === 'input' || tag === 'textarea' || document.activeElement?.isContentEditable;
     if (!editing && e.key === '?') { e.preventDefault(); overlay ? hide() : show(); }
-    if (e.key === 'Escape' && overlay) hide();
   });
 }
 

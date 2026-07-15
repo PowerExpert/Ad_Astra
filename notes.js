@@ -8,7 +8,7 @@ import {
   getChildren, getDescendants, getAncestors, validParentTypesFor, migrateNotesToHierarchy,
   getSettings,
 } from './storage.js';
-import { triggerAutoSuggest } from './ai-suggest.js';import { el, $, $$, clear, renderMarkdownish, formatDate, toast, openContextMenu, contextMenuItems } from './ui.js';
+import { triggerAutoSuggest } from './ai-suggest.js';import { el, $, $$, clear, renderMarkdownish, formatDate, toast, openContextMenu, contextMenuItems, makeActivatable } from './ui.js';
 
 let activeId = null;
 let saveTimer = null;
@@ -17,7 +17,10 @@ let modeSwitchCb = null;
 
 // ── Sidebar customization state (quick filter text + collapsed node ids) ──
 let sidebarFilter = '';
-const COLLAPSE_KEY = 'adastra.sidebarCollapsed';
+// Namespaced by project so collapsed/expanded tree state doesn't leak
+// between separate projects on the hub.
+const PROJECT_ID = (typeof window !== 'undefined' && window.__ADASTRA_PROJECT__) || 'default';
+const COLLAPSE_KEY = PROJECT_ID === 'default' ? 'adastra.sidebarCollapsed' : `adastra.sidebarCollapsed.${PROJECT_ID}`;
 let collapsed = loadCollapsed();
 
 function loadCollapsed() {
@@ -75,8 +78,11 @@ export async function initNotes() {
   $$('.tab-close').forEach(x => x.addEventListener('click', e => { e.stopPropagation(); }));
 
   $('#sidebar-filter-input')?.addEventListener('input', (e) => { sidebarFilter = e.target.value; renderList(); });
-  $('#btn-collapse-all')?.addEventListener('click', collapseAll);
-  $('#btn-expand-all')?.addEventListener('click', expandAll);
+  const collapseBtn = $('#btn-collapse-all'), expandBtn = $('#btn-expand-all');
+  collapseBtn?.addEventListener('click', collapseAll);
+  expandBtn?.addEventListener('click', expandAll);
+  if (collapseBtn) makeActivatable(collapseBtn, { onActivate: collapseAll });
+  if (expandBtn) makeActivatable(expandBtn, { onActivate: expandAll });
 }
 
 export function activeNoteId() { return activeId; }
@@ -87,6 +93,8 @@ export function renderList() {
   const list = $('#note-list');
   if (!list) return;
   clear(list);
+  list.setAttribute('role', 'tree');
+  list.setAttribute('aria-label', 'Vault notes');
 
   const settings = getSettings();
   const sortMode = settings.sidebarOpts?.sort || 'name';
@@ -114,20 +122,35 @@ export function renderList() {
     const chevron = kidCount
       ? el('span', {
           class: 'sb-item-chevron' + (isOpen ? ' open' : ''),
+          role: 'button',
+          tabindex: '-1',
+          'aria-label': (isOpen ? 'Collapse' : 'Expand') + ' ' + (n.title || 'Untitled'),
+          'aria-expanded': isOpen ? 'true' : 'false',
           onclick: (e) => { e.stopPropagation(); toggleCollapse(n.id); },
+          onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleCollapse(n.id); } },
         }, '▸')
       : el('span', { class: 'sb-item-chevron spacer' });
 
     const item = el('div', {
       class: 'sb-item' + (n.id === activeId ? ' active' : ''),
       style: { paddingLeft: (12 + depth * 14) + 'px' },
+      role: 'treeitem',
+      tabindex: '0',
+      'aria-level': String(depth + 1),
+      'aria-selected': n.id === activeId ? 'true' : 'false',
+      ...(kidCount ? { 'aria-expanded': isOpen ? 'true' : 'false' } : {}),
       onclick: () => openTab(n.id),
+      onkeydown: (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTab(n.id); }
+        else if (kidCount && e.key === 'ArrowRight' && !isOpen) { e.preventDefault(); toggleCollapse(n.id); }
+        else if (kidCount && e.key === 'ArrowLeft' && isOpen) { e.preventDefault(); toggleCollapse(n.id); }
+      },
     }, [
       chevron,
       el('div', { class: 'sb-item-dot', style: { background: n.color || '#6F00FF' } }),
       el('span', { class: 'sb-item-type' }, TYPE_BADGE[n.type || 'note'] || 'N'),
       el('span', {}, n.title || 'Untitled'),
-      descCount ? el('span', { class: 'sb-item-count' }, String(descCount)) : null,
+      descCount ? el('span', { class: 'sb-item-count', 'aria-label': `${descCount} descendant${descCount === 1 ? '' : 's'}` }, String(descCount)) : null,
     ].filter(Boolean));
 
     item.addEventListener('contextmenu', (e) => {
@@ -263,20 +286,35 @@ export function closeTab(id) {
 function renderTabs() {
   const host = $('#editor-tabs');
   clear(host);
+  host.setAttribute('role', 'tablist');
+  host.setAttribute('aria-label', 'Open notes');
   for (const id of openTabs) {
     const n = getNote(id);
     if (!n) continue;
     const isActive = id === activeId;
+    const closeBtn = el('span', {
+      class: 'tab-close',
+      role: 'button',
+      tabindex: '0',
+      'aria-label': `Close ${n.title || 'Untitled'}`,
+      onclick: (e) => { e.stopPropagation(); closeTab(id); },
+    }, '×');
+    closeBtn.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); closeTab(id); }
+    });
     const tab = el('div', {
       class: 'tab' + (isActive ? ' active' : ''),
+      role: 'tab',
+      tabindex: '0',
+      'aria-selected': isActive ? 'true' : 'false',
       onclick: () => { activeId = id; renderTabs(); renderEditor(); renderList(); },
+      onkeydown: (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activeId = id; renderTabs(); renderEditor(); renderList(); }
+      },
     }, [
       el('div', { class: 'tab-dot', style: { background: n.color || '#6F00FF' } }),
       el('span', {}, n.title || 'Untitled'),
-      el('span', {
-        class: 'tab-close',
-        onclick: (e) => { e.stopPropagation(); closeTab(id); },
-      }, '×'),
+      closeBtn,
     ]);
     host.appendChild(tab);
   }
@@ -300,12 +338,17 @@ function renderEditor() {
   }
   const note = getNote(activeId);
   if (!note) return;
-  const titleInput = el('div', {
+  const titleInput = el('input', {
     class: 'note-title',
-    contenteditable: 'true',
-    oninput: (e) => scheduleSave({ title: e.target.textContent.trim() || 'Untitled' }),
-  }, note.title || 'Untitled');
-  const tags = (note.tags || []).map(t => el('span', { class: 'note-tag' }, '#' + t));
+    type: 'text',
+    'aria-label': 'Note title',
+    value: note.title || 'Untitled',
+    oninput: (e) => scheduleSave({ title: e.target.value.trim() || 'Untitled' }),
+  });
+  const tags = (note.tags || []).map(t => el('span', {
+    class: 'note-tag', role: 'button', tabindex: '0',
+    'aria-label': `Remove tag ${t}`,
+  }, '#' + t));
 
   const typeSel = el('select', {
     class: 'note-subject',
@@ -337,11 +380,13 @@ function renderEditor() {
     type: 'color',
     class: 'note-color',
     value: note.color || '#6F00FF',
+    'aria-label': 'Note color',
     onchange: (e) => { updateNote(note.id, { color: e.target.value }); renderList(); renderEditor(); toast('Color updated'); },
   });
   const addTagInput = el('input', {
     class: 'add-tag-input',
     placeholder: '+ tag',
+    'aria-label': 'Add tag',
     onkeydown: (e) => {
       if (e.key === 'Enter' && e.target.value.trim()) {
         const t = e.target.value.trim().replace(/^#/, '');
@@ -358,7 +403,10 @@ function renderEditor() {
     updateNote(note.id, { tags });
     renderEditor();
   };
-  tags.forEach((node, i) => node.addEventListener('click', removeTag(i)));
+  tags.forEach((node, i) => {
+    node.addEventListener('click', removeTag(i));
+    node.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); removeTag(i)(e); } });
+  });
 
   const metaChildren = [
     el('span', {}, formatDate(note.updated_at || note.created_at)),
@@ -427,7 +475,7 @@ function scheduleSave(patch) {
 
 function onEditorInput(e) {
   const t = e.target;
-  if (t.classList.contains('note-title')) scheduleSave({ title: t.textContent.trim() || 'Untitled' });
+  if (t.classList.contains('note-title')) scheduleSave({ title: t.value.trim() || 'Untitled' });
   if (t.classList.contains('note-body')) {
     scheduleSave({ body: t.value });
     const wc = document.querySelector('.note-word-count');

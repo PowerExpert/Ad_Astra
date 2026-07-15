@@ -16,7 +16,7 @@ import {
   getGraphObjects, createGraphObject, updateGraphObject, deleteGraphObject,
   importData,
 } from './storage.js';
-import { el, $, clear, toast, openContextMenu, closeContextMenu, contextMenuItems } from './ui.js';
+import { el, $, clear, toast, openContextMenu, closeContextMenu, contextMenuItems, openModal } from './ui.js';
 import { renderList, registerTabSilent } from './notes.js';
 import { triggerAutoSuggest } from './ai-suggest.js';
 
@@ -115,6 +115,17 @@ let mouseWorld = { x: -9999, y: -9999 };
 const TYPE_RADIUS_MULT = { subject: 2.2, topic: 1.6, subtopic: 1.2, note: 0.85 };
 const TITLE_FONT_SIZE  = 30;
 const SWATCHES = ['#6F00FF','#A966FF','#4ADE80','#FBBF24','#38BDF8','#F472B6','#FB923C','#F87171','#FFFFFF'];
+
+// Keyboard-only node navigation: since canvas-drawn nodes aren't
+// individually focusable DOM elements, Tab/Shift+Tab cycles this id
+// instead, Enter opens it, and the render loop draws a visible ring
+// around it so sighted keyboard users can see where focus is too.
+let kbFocusedId = null;
+
+function announceGraphFocus(node) {
+  const live = document.getElementById('graph-live-region');
+  if (live) live.textContent = `${node.label}, ${node.type}. Press Enter to open.`;
+}
 
 export function setOpenNoteCallback(fn) { openNoteCallback = fn; }
 export function setOpts(patch) { opts = { ...opts, ...patch }; }
@@ -339,6 +350,18 @@ export function startGraph() {
         ctx.fill();
       }
 
+      // Keyboard focus ring (Tab-cycling) — a solid, high-contrast ring
+      // distinct from the selection halo so keyboard users can see where
+      // they are, independent of mouse selection state.
+      if (n.id === kbFocusedId) {
+        const focusR = r + 11 / zoom;
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, focusR, 0, Math.PI * 2);
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth   = 2.5 / zoom;
+        ctx.stroke();
+      }
+
       ctx.beginPath();
       drawNodeShape(ctx, n, r + 2 / zoom);
       ctx.strokeStyle = n.id === connectSourceId ? 'rgba(139,127,238,0.9)' : isSelected ? 'rgba(169,102,255,0.8)' : 'rgba(255,255,255,0.18)';
@@ -349,9 +372,10 @@ export function startGraph() {
       ctx.fillStyle = n.color;
       ctx.fill();
       ctx.beginPath();
-      ctx.arc(n.x, n.y, r * 0.35, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.arc(n.x, n.y, r * 0.42, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
       ctx.fill();
+      drawNodeGlyph(ctx, n, r * 0.42);
       if (opts.labels) {
         const weight = n.type === 'subject' ? 700 : n.type === 'topic' ? 600 : 500;
         const size   = (n.type === 'subject' ? 13 : n.type === 'topic' ? 11.5 : n.type === 'subtopic' ? 10.5 : 10) / zoom;
@@ -474,6 +498,7 @@ export function stopGraph() {
   cancelOutlinePlacement();
   cancelLinePlacement();
   clearSelection();
+  kbFocusedId = null;
   rubberBand = null;
   rubberBandLive = null;
   rightPanStart = null;
@@ -484,10 +509,30 @@ export function stopGraph() {
 function nodeRadius(n) { return opts.nodeSize * 0.8 * (TYPE_RADIUS_MULT[n.type] || 1); }
 function hitRadius(n)  { return nodeRadius(n) + 6; }  // slightly larger hit area for comfort
 
+// Every node type gets its own silhouette so type is legible without
+// relying on color at all: hexagon (subject), square (topic),
+// triangle (subtopic), circle (note). A letter glyph (drawNodeGlyph,
+// below) reinforces this further for anyone who can't distinguish shapes
+// at small sizes either.
 function drawNodeShape(ctx, n, r) {
-  if (n.type === 'subject') { drawPolygon(ctx, n.x, n.y, r, 6, Math.PI / 6); return; }
-  if (n.type === 'topic')   { drawPolygon(ctx, n.x, n.y, r, 4, Math.PI / 4); return; }
+  if (n.type === 'subject')  { drawPolygon(ctx, n.x, n.y, r, 6, Math.PI / 6); return; }
+  if (n.type === 'topic')    { drawPolygon(ctx, n.x, n.y, r, 4, Math.PI / 4); return; }
+  if (n.type === 'subtopic') { drawPolygon(ctx, n.x, n.y, r * 1.12, 3, -Math.PI / 2); return; }
   ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+}
+
+const TYPE_GLYPH = { subject: 'S', topic: 'T', subtopic: 'U', note: 'N' };
+
+// Draws a small high-contrast letter/glyph centered on the node — a cue
+// that survives both grayscale rendering and low-vision shape confusion.
+function drawNodeGlyph(ctx, n, dotR) {
+  const glyph = TYPE_GLYPH[n.type] || '•';
+  ctx.font = `700 ${Math.max(6, dotR * 1.15)}px 'Inter', sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(20,10,40,0.8)';
+  ctx.fillText(glyph, n.x, n.y);
+  ctx.textBaseline = 'alphabetic';
 }
 function drawPolygon(ctx, cx, cy, r, sides, rotation = 0) {
   for (let i = 0; i < sides; i++) {
@@ -977,13 +1022,31 @@ function bindInteraction(canvas) {
     showCanvasContextMenu(wx, wy, e.clientX, e.clientY);
   });
 
-  // ── Delete key removes selection; Ctrl+C/Ctrl+V copy & paste ──
+  // ── Delete key removes selection; Ctrl+C/Ctrl+V copy & paste;
+  // Tab/Shift+Tab cycles keyboard focus between graph nodes (since canvas
+  // nodes aren't individually focusable DOM elements); Enter opens the
+  // node with keyboard focus, Escape clears it. ──
   canvas.addEventListener('keydown', (e) => {
     if ((e.key === 'Delete' || e.key === 'Backspace') && selection.size > 0) {
       e.preventDefault();
       deleteSelection();
     }
-    if (e.key === 'Escape') clearSelection();
+    if (e.key === 'Escape') { clearSelection(); kbFocusedId = null; }
+
+    if (e.key === 'Tab') {
+      const nodes = currentNodes();
+      if (nodes.length) {
+        e.preventDefault();
+        let idx = nodes.findIndex(n => n.id === kbFocusedId);
+        idx = e.shiftKey ? (idx - 1 + nodes.length) % nodes.length : (idx + 1) % nodes.length;
+        kbFocusedId = nodes[idx].id;
+        announceGraphFocus(nodes[idx]);
+      }
+    }
+    if (e.key === 'Enter' && kbFocusedId) {
+      e.preventDefault();
+      openNoteCallback?.(kbFocusedId);
+    }
 
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && e.key.toLowerCase() === 'c' && selection.size > 0) {
@@ -1392,10 +1455,36 @@ async function pasteClipboardAt(wx, wy) {
 // ── Context menus ─────────────────────────────────────────────
 function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
+// Accessible color swatch: keyboard-focusable, announced as a radio
+// option with its color, and activatable with Enter/Space as well as
+// click — used by the sticky/outline/link "pick a color" menus.
+function swatchButton(color, isSelected, onPick) {
+  const sw = el('div', {
+    class: 'ctx-swatch' + (isSelected ? ' selected' : ''),
+    style: { background: color },
+    role: 'menuitemradio',
+    tabindex: '-1',
+    'aria-checked': isSelected ? 'true' : 'false',
+    'aria-label': 'Color ' + color,
+    onclick: () => { closeContextMenu(); onPick(color); },
+  });
+  sw.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); closeContextMenu(); onPick(color); }
+  });
+  return sw;
+}
+
 function showCanvasContextMenu(wx, wy, clientX, clientY) {
-  const section = (label) => el('div', { class: 'ctx-menu-section' }, label);
-  const item = (label, fn) => el('div', { class: 'ctx-menu-item', onclick: () => { closeContextMenu(); fn(); } }, label);
-  const menu = el('div', { class: 'ctx-menu' }, [
+  const section = (label) => el('div', { class: 'ctx-menu-section', role: 'presentation' }, label);
+  const item = (label, fn) => {
+    const it = el('div', {
+      class: 'ctx-menu-item', role: 'menuitem', tabindex: '-1',
+      onclick: () => { closeContextMenu(); fn(); },
+    }, label);
+    it.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); closeContextMenu(); fn(); } });
+    return it;
+  };
+  const menu = el('div', { class: 'ctx-menu', role: 'menu', 'aria-label': 'Add to canvas' }, [
     ...(clipboard ? [section('Clipboard'), item('Paste', () => pasteClipboardAt(wx, wy))] : []),
     section('Nodes'),
     ...['subject','topic','subtopic','note'].map(ty => item('+ ' + capitalize(ty), () => openCreateNodeModal(ty, wx, wy))),
@@ -1428,22 +1517,28 @@ function showNodeContextMenu(node, clientX, clientY) {
 function showStickyContextMenu(s, clientX, clientY) {
   const STICKY_COLORS = ['#FBBF24','#4ADE80','#38BDF8','#F472B6','#A78BFA','#FB923C','#F87171'];
   const cur = (s.color || '').toLowerCase();
-  const swatchRow = el('div', { class: 'ctx-swatch-row' },
-    STICKY_COLORS.map(c => el('div', {
-      class: 'ctx-swatch' + (cur === c.toLowerCase() ? ' selected' : ''),
-      style: { background: c },
-      onclick: () => { closeContextMenu(); updateGraphObject(s.id, { color: c }); },
-    }))
+  const swatchRow = el('div', { class: 'ctx-swatch-row', role: 'group', 'aria-label': 'Sticky note color' },
+    STICKY_COLORS.map(c => swatchButton(c, cur === c.toLowerCase(), (color) => updateGraphObject(s.id, { color })))
   );
-  openContextMenu(el('div', { class: 'ctx-menu' }, [
-    el('div', { class: 'ctx-menu-title' }, 'Sticky note'),
-    swatchRow,
-    el('div', { class: 'ctx-menu-item', onclick: () => {
+  const editItem = el('div', {
+    class: 'ctx-menu-item', role: 'menuitem', tabindex: '-1',
+    onclick: () => {
       closeContextMenu();
       const v = prompt('Edit sticky text', s.text || '');
       if (v != null) updateGraphObject(s.id, { text: v });
-    } }, 'Edit text'),
-    el('div', { class: 'ctx-menu-item ctx-menu-danger', onclick: () => { closeContextMenu(); deleteGraphObject(s.id); } }, 'Delete'),
+    },
+  }, 'Edit text');
+  editItem.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') editItem.click(); });
+  const deleteItem = el('div', {
+    class: 'ctx-menu-item ctx-menu-danger', role: 'menuitem', tabindex: '-1',
+    onclick: () => { closeContextMenu(); deleteGraphObject(s.id); },
+  }, 'Delete');
+  deleteItem.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') deleteItem.click(); });
+  openContextMenu(el('div', { class: 'ctx-menu', role: 'menu', 'aria-label': 'Sticky note' }, [
+    el('div', { class: 'ctx-menu-title' }, 'Sticky note'),
+    swatchRow,
+    editItem,
+    deleteItem,
   ]), clientX, clientY);
 }
 
@@ -1465,17 +1560,18 @@ function showTitleContextMenu(ti, clientX, clientY) {
 
 function showColorAndDeleteMenu(title, currentColor, onColor, onDelete, clientX, clientY) {
   const cur = (currentColor || '').toLowerCase();
-  const swatchRow = el('div', { class: 'ctx-swatch-row' },
-    SWATCHES.map(c => el('div', {
-      class: 'ctx-swatch' + (cur === c.toLowerCase() ? ' selected' : ''),
-      style: { background: c },
-      onclick: () => { closeContextMenu(); onColor(c); },
-    }))
+  const swatchRow = el('div', { class: 'ctx-swatch-row', role: 'group', 'aria-label': title + ' color' },
+    SWATCHES.map(c => swatchButton(c, cur === c.toLowerCase(), onColor))
   );
-  openContextMenu(el('div', { class: 'ctx-menu' }, [
+  const deleteItem = el('div', {
+    class: 'ctx-menu-item ctx-menu-danger', role: 'menuitem', tabindex: '-1',
+    onclick: () => { closeContextMenu(); onDelete(); },
+  }, 'Delete');
+  deleteItem.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') deleteItem.click(); });
+  openContextMenu(el('div', { class: 'ctx-menu', role: 'menu', 'aria-label': title }, [
     el('div', { class: 'ctx-menu-title' }, title),
     swatchRow,
-    el('div', { class: 'ctx-menu-item ctx-menu-danger', onclick: () => { closeContextMenu(); onDelete(); } }, 'Delete'),
+    deleteItem,
   ]), clientX, clientY);
 }
 
@@ -1494,20 +1590,22 @@ function getValidParents(type) {
 
 function openCreateNodeModal(defaultType, wx, wy) {
   const host = el('div', { class: 'modal-backdrop' });
-  const titleInput = el('input', { class: 'input', placeholder: 'Title' });
-  const typeSel = el('select', { class: 'select' },
+  const titleId = 'create-node-title';
+  const titleInput = el('input', { class: 'input', placeholder: 'Title', 'aria-label': 'Title' });
+  const typeSel = el('select', { class: 'select', 'aria-label': 'Node type' },
     ['subject','topic','subtopic','note'].map(ty =>
       el('option', { value: ty, ...(ty === defaultType ? { selected: 'selected' } : {}) }, capitalize(ty))));
   const parentWrap = el('div');
-  const err = el('div', { class: 'modal-sub' }, '');
+  const err = el('div', { class: 'modal-sub', role: 'alert' }, '');
 
   const renderParentField = () => {
     clear(parentWrap);
     const ty = typeSel.value;
     if (ty === 'subject') return;
     const candidates = getValidParents(ty);
-    parentWrap.appendChild(el('div', { class: 'modal-sub' }, 'Parent'));
-    parentWrap.appendChild(el('select', { class: 'select', id: 'create-node-parent' }, [
+    const labelId = 'create-node-parent-label';
+    parentWrap.appendChild(el('div', { class: 'modal-sub', id: labelId }, 'Parent'));
+    parentWrap.appendChild(el('select', { class: 'select', id: 'create-node-parent', 'aria-labelledby': labelId }, [
       el('option', { value: '' }, candidates.length ? 'choose parent' : `No ${validParentTypesFor(ty).join('/')} yet — create one first`),
       ...candidates.map(p => el('option', { value: p.id }, `[${p.type}] ${p.title}`)),
     ]));
@@ -1517,6 +1615,7 @@ function openCreateNodeModal(defaultType, wx, wy) {
 
   const createBtn = el('button', { class: 'btn-primary' }, 'Create');
   const cancelBtn = el('button', { class: 'btn-ghost' }, 'Cancel');
+  const doClose = () => close();
   createBtn.addEventListener('click', async () => {
     const title = titleInput.value.trim();
     if (!title) { err.textContent = 'Title required'; return; }
@@ -1539,7 +1638,7 @@ function openCreateNodeModal(defaultType, wx, wy) {
       y: Math.min(Math.max(wy, cyMin), cyMax),
     };
     savePositions();
-    document.body.removeChild(host);
+    doClose();
     renderList();
     toast(`Created ${ty}: ${title}`);
     // Register the new node as the active tab so it's ready when the user
@@ -1548,66 +1647,73 @@ function openCreateNodeModal(defaultType, wx, wy) {
     // AI auto-suggest siblings (fires async, non-blocking)
     triggerAutoSuggest(note, positions, savePositions);
   });
-  cancelBtn.addEventListener('click', () => document.body.removeChild(host));
+  cancelBtn.addEventListener('click', () => doClose());
 
-  host.appendChild(el('div', { class: 'modal' }, [
-    el('div', { class: 'modal-title' }, 'Create node'),
-    el('div', { class: 'modal-sub' }, 'Type'), typeSel,
+  const modalBox = el('div', { class: 'modal' }, [
+    el('div', { class: 'modal-title', id: titleId }, 'Create node'),
+    el('div', { class: 'modal-sub', id: 'create-node-type-label' }, 'Type'), typeSel,
     parentWrap,
-    el('div', { class: 'modal-sub' }, 'Title'), titleInput,
+    el('div', { class: 'modal-sub', id: 'create-node-title-label' }, 'Title'), titleInput,
     err,
     el('div', { style: { display: 'flex', gap: '8px', marginTop: '4px' } }, [createBtn, cancelBtn]),
-  ]));
-  document.body.appendChild(host);
-  titleInput.focus();
+  ]);
+  host.addEventListener('mousedown', (e) => { if (e.target === host) doClose(); });
+  host.appendChild(modalBox);
+  const close = openModal(host, modalBox, { labelledBy: titleId, initialFocus: titleInput });
 }
 
 function openCreateTitleModal(wx, wy) {
   const host = el('div', { class: 'modal-backdrop' });
-  const textInput = el('input', { class: 'input', placeholder: 'e.g. "Midterm topics"' });
-  const err = el('div', { class: 'modal-sub' }, '');
+  const titleId = 'create-title-modal-title';
+  const textInput = el('input', { class: 'input', placeholder: 'e.g. "Midterm topics"', 'aria-label': 'Title text' });
+  const err = el('div', { class: 'modal-sub', role: 'alert' }, '');
   const createBtn = el('button', { class: 'btn-primary' }, 'Create');
   const cancelBtn = el('button', { class: 'btn-ghost' }, 'Cancel');
+  let close;
   createBtn.addEventListener('click', async () => {
     const text = textInput.value.trim();
     if (!text) { err.textContent = 'Text required'; return; }
     await createGraphObject({ type: 'title', text, x: wx, y: wy, color: 'rgba(255,255,255,0.92)' });
-    document.body.removeChild(host);
+    close();
     toast('Title added');
   });
-  cancelBtn.addEventListener('click', () => document.body.removeChild(host));
-  host.appendChild(el('div', { class: 'modal' }, [
-    el('div', { class: 'modal-title' }, 'Add a title'),
+  cancelBtn.addEventListener('click', () => close());
+  const modalBox = el('div', { class: 'modal' }, [
+    el('div', { class: 'modal-title', id: titleId }, 'Add a title'),
     el('div', { class: 'modal-sub' }, 'Big label to mark what a section of the graph is about'),
     textInput, err,
     el('div', { style: { display: 'flex', gap: '8px', marginTop: '4px' } }, [createBtn, cancelBtn]),
-  ]));
-  document.body.appendChild(host);
-  textInput.focus();
+  ]);
+  host.addEventListener('mousedown', (e) => { if (e.target === host) close(); });
+  host.appendChild(modalBox);
+  close = openModal(host, modalBox, { labelledBy: titleId, initialFocus: textInput });
 }
 
 function openCreateStickyModal(wx, wy) {
   const host = el('div', { class: 'modal-backdrop' });
-  const textArea = el('textarea', { class: 'input', placeholder: 'Sticky note text…', style: { minHeight: '80px', resize: 'vertical' } });
-  const err = el('div', { class: 'modal-sub' }, '');
+  const titleId = 'create-sticky-modal-title';
+  const textArea = el('textarea', { class: 'input', placeholder: 'Sticky note text…', 'aria-label': 'Sticky note text', style: { minHeight: '80px', resize: 'vertical' } });
+  const err = el('div', { class: 'modal-sub', role: 'alert' }, '');
   const createBtn = el('button', { class: 'btn-primary' }, 'Create');
   const cancelBtn = el('button', { class: 'btn-ghost' }, 'Cancel');
+  let close;
   createBtn.addEventListener('click', async () => {
     const text = textArea.value.trim();
     if (!text) { err.textContent = 'Text required'; return; }
     await createGraphObject({ type: 'sticky', text, x: wx, y: wy, color: '#FBBF24' });
-    document.body.removeChild(host);
+    close();
     toast('Sticky added');
   });
-  cancelBtn.addEventListener('click', () => document.body.removeChild(host));
-  host.appendChild(el('div', { class: 'modal' }, [
-    el('div', { class: 'modal-title' }, 'Add sticky note'),
+  cancelBtn.addEventListener('click', () => close());
+  const modalBox = el('div', { class: 'modal' }, [
+    el('div', { class: 'modal-title', id: titleId }, 'Add sticky note'),
     el('div', { class: 'modal-sub' }, 'Quick annotation pinned to the canvas'),
     textArea, err,
     el('div', { style: { display: 'flex', gap: '8px', marginTop: '4px' } }, [createBtn, cancelBtn]),
-  ]));
-  document.body.appendChild(host);
-  textArea.focus();
+  ]);
+  host.addEventListener('mousedown', (e) => { if (e.target === host) close(); });
+  host.appendChild(modalBox);
+  close = openModal(host, modalBox, { labelledBy: titleId, initialFocus: textArea });
 }
 
 // ── Keyboard shortcuts ────────────────────────────────────────
@@ -1649,8 +1755,12 @@ function viewportCentre() {
 }
 
 // ── Persistence ───────────────────────────────────────────────
-const POS_KEY   = 'nexuslearn.graphPositions';
-const VIEW_KEY  = 'nexuslearn.graphView';
+// Namespaced by project (see app.html's inline bootstrap script) so each
+// project's canvas layout/pan/zoom is stored independently — otherwise
+// every project would fight over the same saved node positions.
+const PROJECT_ID = (typeof window !== 'undefined' && window.__ADASTRA_PROJECT__) || 'default';
+const POS_KEY   = PROJECT_ID === 'default' ? 'nexuslearn.graphPositions' : `nexuslearn.graphPositions.${PROJECT_ID}`;
+const VIEW_KEY  = PROJECT_ID === 'default' ? 'nexuslearn.graphView'      : `nexuslearn.graphView.${PROJECT_ID}`;
 
 function savePositions() {
   try { localStorage.setItem(POS_KEY, JSON.stringify(positions)); } catch {}
