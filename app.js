@@ -1,5 +1,5 @@
-// app.js — bootstrap, mode switch, settings wiring, auth UI, AI panel.
-import { initStorage, isLocalMode, getCurrentUser, onAuthChange, signIn, signUp, signOut, getSettings, updateSettings, getTests, getNotes, getNoteLinks, getProjectMeta } from './storage.js';
+// app.js — bootstrap, mode switch, settings wiring, auth gate, AI panel.
+import { initStorage, isLocalMode, getCurrentUser, onAuthChange, getSettings, updateSettings, getTests, getNotes, getNoteLinks, getProjectMeta, getProjectId } from './storage.js';
 import { initNotes, openTab, addNote, renderList, setModeSwitchCallback } from './notes.js';
 import { startGraph, stopGraph, setOpts, setOpenNoteCallback, bindGraphShortcuts } from './graph.js';
 import { aiChat } from './ai.js';
@@ -8,6 +8,7 @@ import { initTests, refreshTests } from './tests.js';
 import { el, $, $$, clear, formatDate, toast, daysUntil, openModal } from './ui.js';
 import { AI_CONFIG } from './config.js';
 import { initSearch } from './search.js';
+import { requireAuth, signOutAndRedirect, getSupabaseClient } from './auth.js';
 
 // Two independent tab groups:
 //  - primary:   'notes' | 'graph'                — exactly one always shown.
@@ -43,6 +44,34 @@ document.addEventListener('click', (e) => {
 });
 
 async function bootstrap() {
+  // ── Auth gate ────────────────────────────────────────────────
+  // Local mode (no Supabase configured): auth.local === true, no wall.
+  // Supabase configured: must be signed in, or this redirects to login.html
+  // and returns null — bail out immediately in that case.
+  const auth = await requireAuth('login.html');
+  if (!auth) return;
+
+  // ── Ownership check ──────────────────────────────────────────
+  // Prevents opening ?project=<someone-else's-id> by guessing/pasting a
+  // URL. storage.js's own per-project Supabase filtering already means a
+  // mismatched project would just come back empty, but bouncing back to
+  // the hub with an explanation is a much better experience than a blank
+  // vault.
+  if (!auth.local) {
+    const sb = await getSupabaseClient();
+    const projectId = getProjectId();
+    try {
+      const { data: projRow } = await sb.from('projects').select('id,user_id').eq('id', projectId).maybeSingle();
+      if (!projRow || projRow.user_id !== auth.user.id) {
+        toast('That project isn\'t yours (or no longer exists).');
+        location.href = 'index.html';
+        return;
+      }
+    } catch (err) {
+      console.warn('Project ownership check failed — continuing, storage.js filtering still applies.', err);
+    }
+  }
+
   await initStorage();
   const user = getCurrentUser();
   setAvatar(user);
@@ -88,10 +117,6 @@ async function bootstrap() {
   // Global keyboard shortcuts
   bindGraphShortcuts();
   bindShortcutHelp();
-
-  if (!isLocalMode() && !user.email) {
-    renderAuthModal(true);
-  }
 
   // Initial AI greeting
   pushAiMsg('assistant', `Welcome to Ad Astra. ${isLocalMode() ? 'Running in local mode — set Supabase and AI keys in config.js to enable sync and real AI.' : `Signed in as ${user.email}.`}`, { type: 'insight' });
@@ -449,61 +474,31 @@ function pushTyping() {
   return t;
 }
 
+// ── Auth buttons (topbar) ────────────────────────────────────────
+// Sign-in now always goes to the dedicated login.html page instead of an
+// in-app modal; sign-out clears the Supabase session and redirects there
+// too, since there's no "staying signed out on this page" state anymore —
+// this page requires an account whenever Supabase is configured.
 function bindAuthButtons() {
-  $('#btn-auth')?.addEventListener('click', () => renderAuthModal(true));
-  $('#btn-signout')?.addEventListener('click', async () => { await signOut(); toast('Signed out'); setAvatar(getCurrentUser()); $('#btn-signout').style.display = 'none'; $('#btn-auth').style.display = ''; });
+  $('#btn-auth')?.addEventListener('click', () => { location.href = 'login.html'; });
+  $('#btn-signout')?.addEventListener('click', () => { signOutAndRedirect('login.html'); });
+
   onAuthChange((u) => {
-    setAvatar(u);
+    setAvatar(u.email ? u : { email: '' });
     $('#btn-signout').style.display = u.email ? '' : 'none';
     $('#btn-auth').style.display = u.email ? 'none' : '';
-    if (u.email) $('#auth-modal-host').innerHTML = '';
   });
-  // Initial visibility
-  const u = getCurrentUser();
-  if (u.email) { $('#btn-signout').style.display = ''; $('#btn-auth').style.display = 'none'; }
-  else if (!isLocalMode()) { $('#btn-signout').style.display = 'none'; $('#btn-auth').style.display = ''; }
-}
 
-function renderAuthModal(visible) {
-  const host = $('#auth-modal-host');
-  let closeModalFocus = null;
-  if (!visible) { closeModalFocus?.(); host.innerHTML = ''; return; }
-  clear(host);
-  const mode = { kind: 'signin' };
-  const titleId = 'auth-modal-title';
-  const draw = () => {
-    clear(host);
-    const email = el('input', { class: 'input', type: 'email', placeholder: 'Email', 'aria-label': 'Email' });
-    const pw = el('input', { class: 'input', type: 'password', placeholder: 'Password', 'aria-label': 'Password' });
-    const submit = el('button', { class: 'btn-primary' }, mode.kind === 'signin' ? 'Sign in' : 'Sign up');
-    const switcher = el('button', { class: 'btn-ghost' }, mode.kind === 'signin' ? 'Need an account?' : 'Have an account?');
-    const err = el('div', { class: 'modal-sub', role: 'alert' }, '');
-    const doClose = () => { closeModalFocus?.(); host.innerHTML = ''; };
-    const closeBtn = el('span', { class: 'modal-close', role: 'button', tabindex: '0', 'aria-label': 'Close dialog', onclick: doClose }, '×');
-    closeBtn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doClose(); } });
-    submit.addEventListener('click', async () => {
-      err.textContent = '';
-      const r = mode.kind === 'signin' ? await signIn(email.value, pw.value) : await signUp(email.value, pw.value);
-      if (r.error) err.textContent = r.error;
-      else { toast(mode.kind === 'signin' ? 'Signed in' : 'Check your email'); doClose(); }
-    });
-    switcher.addEventListener('click', () => { mode.kind = mode.kind === 'signin' ? 'signup' : 'signin'; draw(); });
-    const modalBox = el('div', { class: 'modal' }, [
-      el('div', { class: 'modal-title-row' }, [
-        el('div', { class: 'modal-title', id: titleId }, 'Sign in to Ad Astra'),
-        closeBtn,
-      ]),
-      el('div', { class: 'modal-sub' }, 'Your notes and progress sync across devices.'),
-      email, pw, err, submit, switcher,
-    ]);
-    const backdrop = el('div', {
-      class: 'modal-backdrop',
-      onclick: (e) => { if (e.target === backdrop) doClose(); },
-    }, [modalBox]);
-    host.appendChild(backdrop);
-    closeModalFocus = openModal(backdrop, modalBox, { labelledBy: titleId, initialFocus: email, onClose: () => {} });
-  };
-  draw();
+  const u = getCurrentUser();
+  if (isLocalMode()) {
+    // No accounts at all — hide both buttons, there's nothing to do here.
+    $('#btn-signout').style.display = 'none';
+    $('#btn-auth').style.display = 'none';
+  } else {
+    // bootstrap() already guaranteed we're signed in by this point.
+    $('#btn-signout').style.display = '';
+    $('#btn-auth').style.display = 'none';
+  }
 }
 
 // ── Keyboard shortcut help overlay (press ?) ──────────────────

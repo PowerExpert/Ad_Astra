@@ -1,13 +1,21 @@
 // storage.js — persistence layer.
 // Two backends:
-//   1) Supabase (real auth + per-user sync) when SUPABASE_CONFIG is filled in.
+//   1) Supabase (real auth + per-user, per-PROJECT sync) when SUPABASE_CONFIG is filled in.
 //   2) localStorage fallback when it isn't — keeps the app usable.
 //
-// Notes are now typed nodes in a hierarchy:
+// Notes are typed nodes in a hierarchy:
 //   subject (largest) > topic > subtopic > note (smallest, "anything")
 // `parent_id` encodes the hierarchy edge. `note_links` still exists for
 // wikilink-derived links (kind: 'wikilink') and now also for explicit
 // graph connections drawn by the user (kind: 'manual').
+//
+// ── Per-project Supabase isolation ──────────────────────────────────
+// Every Supabase row now also carries a `project_id` column (see the SQL
+// migration shipped alongside this file). Without it, two projects owned
+// by the same signed-in account would previously share the exact same
+// Supabase rows (there was nothing distinguishing them once user_id
+// matched) — this file now stamps every row it creates with the current
+// project's id, and every pull/import/delete is filtered by it too.
 import { SUPABASE_CONFIG, APP_CONFIG } from './config.js';
 
 // Every page load resolves which project it belongs to via a tiny inline
@@ -20,7 +28,11 @@ import { SUPABASE_CONFIG, APP_CONFIG } from './config.js';
 const PROJECT_ID    = (typeof window !== 'undefined' && window.__ADASTRA_PROJECT__) || 'default';
 const LS_KEY_BASE    = 'nexuslearn.v2';
 const LS_KEY         = PROJECT_ID === 'default' ? LS_KEY_BASE : `${LS_KEY_BASE}.${PROJECT_ID}`;
-const PROJECTS_KEY   = 'adastra.projects'; // shared registry read by index.html (the project hub)
+const PROJECTS_KEY   = 'adastra.projects'; // local-mode-only registry read by index.html
+// The Supabase `project_id` column is a uuid. The legacy 'default' single-
+// vault project isn't a real uuid, so it's represented as NULL in Supabase
+// (an "unassigned" bucket) rather than failing every insert/query.
+const SUPA_PROJECT_ID = PROJECT_ID === 'default' ? null : PROJECT_ID;
 let supabase = null;
 let currentUser = null;
 let localMode = false;
@@ -57,14 +69,29 @@ function loadCache() {
 
 // Backfill fields on data saved before nodes had types/hierarchy, and
 // before graph_objects (Title/Outline canvas annotations) existed.
+//
+// Also defends against a *partial* cache shape entirely — this happens
+// when a Graph export (notes/note_links/graph_objects only) gets loaded
+// through the Project import path on the hub, which writes whatever JSON
+// it's given straight into this project's localStorage slot with no
+// shape-checking. Without these fallbacks, cache.materials/tests/
+// test_attempts/flashcards stay `undefined`, and the first call to
+// getMaterials()/getTests()/etc. throws "Cannot read properties of
+// undefined (reading 'slice')" on boot.
 function migrateCacheShape() {
-  if (!cache.graph_objects) cache.graph_objects = [];
+  if (!cache.user_id) cache.user_id = APP_CONFIG.localUserId;
+  if (!Array.isArray(cache.notes)) cache.notes = [];
+  if (!Array.isArray(cache.note_links)) cache.note_links = [];
+  if (!Array.isArray(cache.graph_objects)) cache.graph_objects = [];
+  if (!Array.isArray(cache.materials)) cache.materials = [];
+  if (!Array.isArray(cache.tests)) cache.tests = [];
+  if (!Array.isArray(cache.test_attempts)) cache.test_attempts = [];
+  if (!Array.isArray(cache.flashcards)) cache.flashcards = [];
   if (!cache.settings) cache.settings = defaultSettings();
   // Backfill sidebar customization opts for settings saved before this existed.
   if (!cache.settings.sidebarOpts) {
     cache.settings.sidebarOpts = { width: 200, sort: 'name', showProgress: true, showExam: true, compact: false };
   }
-  if (!cache.notes) return;
   for (const n of cache.notes) {
     if (!NODE_TYPES.includes(n.type)) n.type = 'note';
     if (n.parent_id === undefined) n.parent_id = null;
@@ -157,6 +184,26 @@ function seedDemoData() {
   cache.graph_objects= graph_objects;
 }
 
+// Maps a raw user_settings row (snake_case, as stored in Supabase) back to
+// the camelCase shape every other module reads via getSettings(). Falls
+// back per-field to defaultSettings() so a partially-filled/legacy row
+// (or no row at all) still produces a complete settings object.
+function rowToSettings(row) {
+  const d = defaultSettings();
+  if (!row) return d;
+  return {
+    accent:       row.accent        ?? d.accent,
+    accentBright: row.accent_bright ?? d.accentBright,
+    fontSize:     row.font_size     ?? d.fontSize,
+    fontFamily:   row.font_family   ?? d.fontFamily,
+    graphOpts:    row.graph_opts    ?? d.graphOpts,
+    aiOpts:       row.ai_opts       ?? d.aiOpts,
+    addons:       row.addons        ?? d.addons,
+    examDate:     row.exam_date     ?? d.examDate,
+    sidebarOpts:  row.sidebar_opts  ?? d.sidebarOpts,
+  };
+}
+
 function defaultSettings() {
   return {
     accent: '#6F00FF',
@@ -176,11 +223,11 @@ function saveCache() {
   touchProjectMeta();
 }
 
-// Bumps this project's `updatedAt` in the shared registry (read by the
-// project hub / index.html) so "recently edited" ordering stays accurate.
-// Silently creates a registry entry if one doesn't exist yet — this keeps
-// legacy single-vault users (project id 'default') showing up on the hub
-// without needing a separate migration step.
+// Bumps this project's `updatedAt` in the LOCAL-MODE registry only (the
+// one read by index.html when Supabase isn't configured). When Supabase
+// IS configured, index.html/projects.js maintains `updated_at` on the
+// `projects` table directly, so this is a no-op there beyond the harmless
+// local mirror it also happens to keep.
 function touchProjectMeta() {
   try {
     const raw = localStorage.getItem(PROJECTS_KEY);
@@ -199,7 +246,7 @@ export function getCurrentUser() {
   return currentUser ? { id: currentUser.id, email: currentUser.email } : { id: APP_CONFIG.localUserId, email: 'local' };
 }
 
-// ── Project identity (used by app.js to label the topbar) ────────────
+// ── Project identity (used by app.js to label the topbar / check ownership) ──
 export function getProjectId() { return PROJECT_ID; }
 export function getProjectMeta() {
   try {
@@ -208,6 +255,13 @@ export function getProjectMeta() {
     if (found) return found;
   } catch {}
   return { id: PROJECT_ID, name: PROJECT_ID === 'default' ? 'My Vault' : 'Untitled Project' };
+}
+
+// Applies the project filter to a Supabase query builder. NULL project_id
+// (the legacy 'default' bucket) needs `.is()`, not `.eq()` — PostgREST
+// treats those differently.
+function withProject(query) {
+  return SUPA_PROJECT_ID === null ? query.is('project_id', null) : query.eq('project_id', SUPA_PROJECT_ID);
 }
 
 export async function initStorage() {
@@ -281,14 +335,14 @@ async function pullAll() {
   if (!supabase || !currentUser) return;
   const uid = currentUser.id;
   const [notesR, linksR, objR, matsR, testsR, attemptsR, cardsR, setR] = await Promise.all([
-    supabase.from('notes').select('*').eq('user_id', uid),
-    supabase.from('note_links').select('*').eq('user_id', uid),
-    supabase.from('graph_objects').select('*').eq('user_id', uid),
-    supabase.from('materials').select('*').eq('user_id', uid),
-    supabase.from('tests').select('*').eq('user_id', uid),
-    supabase.from('test_attempts').select('*').eq('user_id', uid),
-    supabase.from('flashcards').select('*').eq('user_id', uid),
-    supabase.from('user_settings').select('*').eq('user_id', uid).maybeSingle(),
+    withProject(supabase.from('notes').select('*').eq('user_id', uid)),
+    withProject(supabase.from('note_links').select('*').eq('user_id', uid)),
+    withProject(supabase.from('graph_objects').select('*').eq('user_id', uid)),
+    withProject(supabase.from('materials').select('*').eq('user_id', uid)),
+    withProject(supabase.from('tests').select('*').eq('user_id', uid)),
+    withProject(supabase.from('test_attempts').select('*').eq('user_id', uid)),
+    withProject(supabase.from('flashcards').select('*').eq('user_id', uid)),
+    withProject(supabase.from('user_settings').select('*').eq('user_id', uid)).maybeSingle(),
   ]);
   cache = {
     user_id: uid,
@@ -299,7 +353,7 @@ async function pullAll() {
     tests: testsR.data || [],
     test_attempts: attemptsR.data || [],
     flashcards: cardsR.data || [],
-    settings: setR.data || defaultSettings(),
+    settings: rowToSettings(setR.data),
   };
   migrateCacheShape();
   saveCache();
@@ -392,6 +446,7 @@ export async function createNote(partial) {
   const note = {
     id: crypto.randomUUID(),
     user_id: getCurrentUser().id,
+    project_id: SUPA_PROJECT_ID,
     type: NODE_TYPES.includes(partial.type) ? partial.type : 'note',
     parent_id: partial.parent_id || null,
     title: partial.title || 'Untitled',
@@ -456,7 +511,7 @@ export async function rebuildLinksFor(note) {
     if (target && target.id !== note.id) targets.add(target.id);
   }
   for (const tid of targets) {
-    const link = { id: crypto.randomUUID(), user_id: note.user_id, source: note.id, target: tid, kind: 'wikilink' };
+    const link = { id: crypto.randomUUID(), user_id: note.user_id, project_id: SUPA_PROJECT_ID, source: note.id, target: tid, kind: 'wikilink' };
     cache.note_links.push(link);
     await maybeUpsert('note_links', link);
   }
@@ -466,7 +521,7 @@ export async function rebuildLinksFor(note) {
 export async function rebuildAllLinks() {
   cache.note_links = cache.note_links.filter(l => l.kind === 'manual');
   if (!supabase) { saveCache(); return; }
-  await supabase.from('note_links').delete().eq('user_id', currentUser.id).neq('kind', 'manual');
+  await withProject(supabase.from('note_links').delete().eq('user_id', currentUser.id).neq('kind', 'manual'));
   for (const n of cache.notes) await rebuildLinksFor(n);
 }
 
@@ -476,7 +531,7 @@ export async function createManualLink(sourceId, targetId, color = null) {
   const exists = cache.note_links.find(l =>
     (l.source === sourceId && l.target === targetId) || (l.source === targetId && l.target === sourceId));
   if (exists) return exists;
-  const link = { id: crypto.randomUUID(), user_id: getCurrentUser().id, source: sourceId, target: targetId, kind: 'manual', color };
+  const link = { id: crypto.randomUUID(), user_id: getCurrentUser().id, project_id: SUPA_PROJECT_ID, source: sourceId, target: targetId, kind: 'manual', color };
   cache.note_links.push(link);
   saveCache();
   await maybeUpsert('note_links', link);
@@ -507,6 +562,7 @@ export async function createGraphObject(partial) {
   const obj = {
     id: crypto.randomUUID(),
     user_id: getCurrentUser().id,
+    project_id: SUPA_PROJECT_ID,
     type: partial.type, // 'title' | 'outline'
     ...partial,
   };
@@ -536,6 +592,7 @@ export async function createMaterial(partial) {
   const m = {
     id: crypto.randomUUID(),
     user_id: getCurrentUser().id,
+    project_id: SUPA_PROJECT_ID,
     subject: partial.subject || 'General',
     title: partial.title || 'Untitled material',
     kind: partial.kind || 'article',
@@ -569,6 +626,7 @@ export async function createTest(partial) {
   const t = {
     id: crypto.randomUUID(),
     user_id: getCurrentUser().id,
+    project_id: SUPA_PROJECT_ID,
     subject: partial.subject || 'General',
     title: partial.title || 'Test',
     items: partial.items || [],
@@ -592,6 +650,7 @@ export async function recordAttempt(testId, answers, score) {
     id: crypto.randomUUID(),
     test_id: testId,
     user_id: getCurrentUser().id,
+    project_id: SUPA_PROJECT_ID,
     answers,
     score,
     taken_at: new Date().toISOString(),
@@ -607,6 +666,7 @@ export async function createFlashcard(partial) {
   const c = {
     id: crypto.randomUUID(),
     user_id: getCurrentUser().id,
+    project_id: SUPA_PROJECT_ID,
     front: partial.front || '',
     back: partial.back || '',
     subject: partial.subject || 'General',
@@ -652,8 +712,27 @@ export async function updateSettings(patch) {
   cache.settings = { ...cache.settings, ...patch };
   saveCache();
   if (supabase && currentUser) {
-    const row = { user_id: currentUser.id, ...cache.settings };
-    await supabase.from('user_settings').upsert(row);
+    const s = cache.settings;
+    const row = {
+      user_id:       currentUser.id,
+      project_id:    SUPA_PROJECT_ID,
+      accent:        s.accent,
+      accent_bright: s.accentBright,
+      font_size:     s.fontSize,
+      font_family:   s.fontFamily,
+      graph_opts:    s.graphOpts,
+      ai_opts:       s.aiOpts,
+      addons:        s.addons,
+      exam_date:     s.examDate,
+      sidebar_opts:  s.sidebarOpts,
+    };
+    // project_key is a generated column (coalesce(project_id, sentinel-uuid))
+    // added by user_settings-fix.sql — ON CONFLICT can't infer a partial
+    // unique index from a bare column list, and two NULL project_ids never
+    // "conflict" with each other, so targeting project_id directly would
+    // insert a fresh row on every save for the default (no-project) vault
+    // instead of updating the existing one.
+    await supabase.from('user_settings').upsert(row, { onConflict: 'user_id,project_key' });
   }
 }
 
@@ -678,11 +757,14 @@ export function exportData() {
 // leaving any collection payload doesn't mention untouched — so an import
 // of just { notes, note_links, graph_objects } (a "graph" export) leaves
 // materials/tests/flashcards exactly as they were. Persists locally, and
-// best-effort mirrors the change to Supabase when signed in.
+// best-effort mirrors the change to Supabase when signed in — scoped to
+// THIS project only, so importing into Project A never touches Project B.
 export async function importData(payload) {
   if (!payload || typeof payload !== 'object') throw new Error('Invalid import payload');
   const uid = getCurrentUser().id;
-  const stamp = (rows) => (Array.isArray(rows) ? rows.map(r => ({ ...r, user_id: r.user_id || uid })) : null);
+  const stamp = (rows) => (Array.isArray(rows)
+    ? rows.map(r => ({ ...r, user_id: r.user_id || uid, project_id: SUPA_PROJECT_ID }))
+    : null);
 
   const next = {
     notes:         stamp(payload.notes),
@@ -704,7 +786,7 @@ export async function importData(payload) {
     const pushReplace = async (table, rows) => {
       if (!rows) return;
       try {
-        await supabase.from(table).delete().eq('user_id', uid);
+        await withProject(supabase.from(table).delete().eq('user_id', uid));
         if (rows.length) await supabase.from(table).insert(rows);
       } catch (err) { console.warn(`import replace ${table} failed`, err); }
     };

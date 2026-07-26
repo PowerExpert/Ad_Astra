@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign in — Ad Astra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    #login-app {
+      width: 100vw;
+      min-height: 100vh;
+      background: var(--void);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .login-card {
+      width: 360px;
+      max-width: 100%;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px 26px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .login-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: 'Space Grotesk', sans-serif;
+      font-weight: 700;
+      font-size: 18px;
+      color: var(--white);
+      justify-content: center;
+      margin-bottom: 2px;
+    }
+    .login-logo-icon {
+      width: 30px; height: 30px;
+      background: var(--violet);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .login-logo-icon svg { width: 16px; height: 16px; }
+    .login-tagline { font-size: 12.5px; color: var(--text-dim); text-align: center; margin-bottom: 6px; }
+    .login-tabs { display: flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+    .login-tab {
+      flex: 1; text-align: center; padding: 7px 0; font-size: 12.5px;
+      color: var(--text-muted); cursor: pointer; background: transparent;
+      transition: all .12s; user-select: none;
+    }
+    .login-tab.active { background: var(--violet-glow); color: var(--violet-bright); }
+    .login-error { font-size: 12px; color: #F87171; min-height: 14px; }
+    .login-note { font-size: 11px; color: var(--text-dim); text-align: center; margin-top: 2px; }
+    .login-banner {
+      font-size: 11.5px; color: var(--warn);
+      background: rgba(251,191,36,0.08); border: 1px solid var(--warn);
+      border-radius: 6px; padding: 8px 10px; text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div id="login-app">
+    <div class="login-card">
+      <div class="login-logo">
+        <div class="login-logo-icon">
+          <svg viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <polygon points="6.5,1 12,4.5 12,9.5 6.5,12 1,9.5 1,4.5" fill="none" stroke="white" stroke-width="1.2"/>
+            <line x1="6.5" y1="1" x2="6.5" y2="12" stroke="white" stroke-width="0.8" opacity="0.5"/>
+            <line x1="1" y1="4.5" x2="12" y2="9.5" stroke="white" stroke-width="0.8" opacity="0.5"/>
+            <line x1="12" y1="4.5" x2="1" y2="9.5" stroke="white" stroke-width="0.8" opacity="0.5"/>
+          </svg>
+        </div>
+        Ad Astra
+      </div>
+      <div class="login-tagline">Sign in to sync your projects across devices.</div>
+      <div id="login-banner-host"></div>
+      <div class="login-tabs" id="login-tabs">
+        <div class="login-tab active" data-mode="signin" role="tab" tabindex="0">Sign in</div>
+        <div class="login-tab" data-mode="signup" role="tab" tabindex="0">Sign up</div>
+      </div>
+      <input id="login-email" class="input" type="email" placeholder="Email" autocomplete="email" />
+      <input id="login-password" class="input" type="password" placeholder="Password" autocomplete="current-password" />
+      <div class="login-error" id="login-error" role="alert"></div>
+      <button id="login-submit" class="btn-primary" style="padding:8px 0;">Sign in</button>
+      <div class="login-note" id="login-note">Don't have an account? Click "Sign up" above.</div>
+    </div>
+  </div>
+  <script type="module" src="login.js"></script>
+</body>
+</html>

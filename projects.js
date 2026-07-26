@@ -8,13 +8,22 @@
 // anyone upgrading from the single-vault version of Ad Astra keeps their
 // existing data as "My Vault" with zero migration steps.
 //
+// ── Accounts ─────────────────────────────────────────────────────────
+// When Supabase is configured, this page now REQUIRES sign-in and the
+// project *list itself* lives in a `projects` table scoped to `user_id` —
+// so signing in as a different account shows that account's projects,
+// not whatever's cached in this browser. When Supabase isn't configured
+// at all, there's no login wall and the original shared-local-vault
+// behavior is preserved exactly.
+//
 // Opening a project navigates to app.html?project=<id> — a real page
 // load, not an in-page route change — which is what guarantees each
 // project's JS module state (graph positions, open tabs, AI history…)
 // starts completely clean instead of leaking between projects.
 import { el, $, clear, toast, openModal } from './ui.js';
+import { requireAuth, signOutAndRedirect, getSupabaseClient } from './auth.js';
 
-const PROJECTS_KEY = 'adastra.projects';
+const PROJECTS_KEY = 'adastra.projects'; // local-mode-only registry
 const LS_BASE       = 'nexuslearn.v2';
 const POS_BASE      = 'nexuslearn.graphPositions';
 const VIEW_BASE     = 'nexuslearn.graphView';
@@ -29,23 +38,63 @@ const collapseKeyFor   = (id) => keyFor(COLLAPSE_BASE, id);
 const PALETTE = ['#6F00FF', '#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#4ADE80', '#38BDF8'];
 let filterText = '';
 
-// ── Registry (list of projects) ───────────────────────────────
-function loadRegistry() {
+let authState = null;    // { user, local }
+let supabase  = null;    // Supabase client, or null in local mode
+let registryCache = [];  // in-memory list of {id,name,color,createdAt,updatedAt}
+
+// ── Local-mode registry (unchanged — single shared vault, no accounts) ─
+function loadLocalRegistry() {
   let list = [];
   try { list = JSON.parse(localStorage.getItem(PROJECTS_KEY) || '[]'); } catch { list = []; }
   if (!Array.isArray(list)) list = [];
   if (!list.find(p => p.id === 'default')) {
     const now = new Date().toISOString();
     list.unshift({ id: 'default', name: 'My Vault', color: PALETTE[0], createdAt: now, updatedAt: now });
-    saveRegistry(list);
+    saveLocalRegistry(list);
   }
   return list;
 }
-function saveRegistry(list) {
+function saveLocalRegistry(list) {
   try { localStorage.setItem(PROJECTS_KEY, JSON.stringify(list)); } catch {}
 }
 
-// ── Reading a project's raw data (without loading the whole app) ──
+// Per-account offline cache, namespaced by user id, so switching accounts
+// in the same browser never flashes another account's project list if
+// Supabase is briefly unreachable.
+const cacheKeyFor = (uid) => `adastra.projects.cache.${uid}`;
+function loadAccountCache(uid) {
+  try { return JSON.parse(localStorage.getItem(cacheKeyFor(uid)) || '[]'); } catch { return []; }
+}
+function saveAccountCache(uid, list) {
+  try { localStorage.setItem(cacheKeyFor(uid), JSON.stringify(list)); } catch {}
+}
+
+function rowToProject(row) {
+  return { id: row.id, name: row.name, color: row.color, createdAt: row.created_at, updatedAt: row.updated_at };
+}
+
+// ── Registry loading (forks on auth mode) ──────────────────────
+async function loadRegistry() {
+  if (authState.local) return loadLocalRegistry();
+  const uid = authState.user.id;
+  try {
+    const { data, error } = await supabase
+      .from('projects')
+      .select('*')
+      .eq('user_id', uid)
+      .order('updated_at', { ascending: false });
+    if (error) throw error;
+    const list = (data || []).map(rowToProject);
+    saveAccountCache(uid, list);
+    return list;
+  } catch (err) {
+    console.warn('Failed to load projects from Supabase, showing offline cache', err);
+    toast('Could not reach the server — showing your last known projects.');
+    return loadAccountCache(uid);
+  }
+}
+
+// ── Reading a project's raw local data (for the stat line on each card) ──
 function readProjectData(id) {
   try {
     const raw = localStorage.getItem(lsKeyFor(id));
@@ -59,50 +108,75 @@ function projectStats(id) {
   return { subjects, notes: data.notes.length };
 }
 
-// ── CRUD ────────────────────────────────────────────────────────
-function createProject(name, color) {
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  const list = loadRegistry();
-  list.push({ id, name: (name || 'Untitled Project').trim() || 'Untitled Project', color: color || PALETTE[Math.floor(Math.random() * PALETTE.length)], createdAt: now, updatedAt: now });
-  saveRegistry(list);
-  return id;
+// ── CRUD (forks on auth mode) ───────────────────────────────────
+async function createProject(name, color) {
+  const finalName = (name || 'Untitled Project').trim() || 'Untitled Project';
+  const finalColor = color || PALETTE[Math.floor(Math.random() * PALETTE.length)];
+
+  if (authState.local) {
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const list = loadLocalRegistry();
+    list.push({ id, name: finalName, color: finalColor, createdAt: now, updatedAt: now });
+    saveLocalRegistry(list);
+    return id;
+  }
+
+  const uid = authState.user.id;
+  const { data, error } = await supabase
+    .from('projects')
+    .insert({ user_id: uid, name: finalName, color: finalColor })
+    .select()
+    .single();
+  if (error) { toast('Could not create project: ' + error.message); throw error; }
+  registryCache = [rowToProject(data), ...registryCache];
+  saveAccountCache(uid, registryCache);
+  return data.id;
 }
 
-function renameProject(id, name) {
-  const list = loadRegistry();
-  const p = list.find(x => x.id === id);
-  if (!p) return;
-  p.name = name.trim() || p.name;
-  p.updatedAt = new Date().toISOString();
-  saveRegistry(list);
-  render();
+async function renameProject(id, name) {
+  const trimmed = (name || '').trim();
+  if (!trimmed) return;
+  if (authState.local) {
+    const list = loadLocalRegistry();
+    const p = list.find(x => x.id === id);
+    if (!p) return;
+    p.name = trimmed;
+    p.updatedAt = new Date().toISOString();
+    saveLocalRegistry(list);
+  } else {
+    const { error } = await supabase.from('projects').update({ name: trimmed, updated_at: new Date().toISOString() }).eq('id', id);
+    if (error) { toast('Rename failed: ' + error.message); return; }
+  }
+  await refresh();
 }
 
-function deleteProject(id) {
-  const list = loadRegistry().filter(p => p.id !== id);
-  saveRegistry(list);
+async function deleteProject(id) {
+  if (authState.local) {
+    saveLocalRegistry(loadLocalRegistry().filter(p => p.id !== id));
+  } else {
+    // FK cascade on the `projects` table (see SQL migration) removes the
+    // project's notes/tests/etc. rows in Supabase automatically.
+    const { error } = await supabase.from('projects').delete().eq('id', id);
+    if (error) { toast('Delete failed: ' + error.message); return; }
+  }
   localStorage.removeItem(lsKeyFor(id));
   localStorage.removeItem(posKeyFor(id));
   localStorage.removeItem(viewKeyFor(id));
   localStorage.removeItem(collapseKeyFor(id));
-  render();
+  await refresh();
 }
 
-function duplicateProject(id) {
-  const src = loadRegistry().find(p => p.id === id);
+async function duplicateProject(id) {
+  const src  = registryCache.find(p => p.id === id);
   const data = localStorage.getItem(lsKeyFor(id));
   const pos  = localStorage.getItem(posKeyFor(id));
   const view = localStorage.getItem(viewKeyFor(id));
-  const newId = crypto.randomUUID();
+  const newId = await createProject(`${src?.name || 'Project'} (copy)`, src?.color);
   if (data) localStorage.setItem(lsKeyFor(newId), data);
   if (pos)  localStorage.setItem(posKeyFor(newId), pos);
   if (view) localStorage.setItem(viewKeyFor(newId), view);
-  const now = new Date().toISOString();
-  const list = loadRegistry();
-  list.push({ id: newId, name: `${src?.name || 'Project'} (copy)`, color: src?.color || PALETTE[0], createdAt: now, updatedAt: now });
-  saveRegistry(list);
-  render();
+  await refresh();
   toast(`Duplicated "${src?.name || 'Project'}"`);
 }
 
@@ -110,9 +184,14 @@ function openProject(id) {
   location.href = `app.html?project=${encodeURIComponent(id)}`;
 }
 
+async function refresh() {
+  registryCache = await loadRegistry();
+  render();
+}
+
 // ── Export / Import (a full project — data + layout — as one file) ──
 function exportProject(id) {
-  const meta = loadRegistry().find(p => p.id === id);
+  const meta = registryCache.find(p => p.id === id);
   const data = readProjectData(id) || { notes: [], note_links: [], graph_objects: [] };
   let positions = null, view = null;
   try { positions = JSON.parse(localStorage.getItem(posKeyFor(id)) || 'null'); } catch {}
@@ -136,22 +215,15 @@ async function importProjectFile(file) {
   const data = payload?.data || payload; // tolerate a raw graph export too
   if (!data || !Array.isArray(data.notes)) { toast('That file doesn\'t look like an Ad Astra project export'); return; }
 
-  const id = crypto.randomUUID();
+  const id = await createProject(
+    payload.project?.name ? `${payload.project.name} (imported)` : 'Imported Project',
+    payload.project?.color
+  );
   localStorage.setItem(lsKeyFor(id), JSON.stringify(data));
   if (payload.positions) localStorage.setItem(posKeyFor(id), JSON.stringify(payload.positions));
   if (payload.view) localStorage.setItem(viewKeyFor(id), JSON.stringify(payload.view));
 
-  const now = new Date().toISOString();
-  const list = loadRegistry();
-  list.push({
-    id,
-    name: payload.project?.name ? `${payload.project.name} (imported)` : 'Imported Project',
-    color: payload.project?.color || PALETTE[Math.floor(Math.random() * PALETTE.length)],
-    createdAt: now,
-    updatedAt: now,
-  });
-  saveRegistry(list);
-  render();
+  await refresh();
   toast('Project imported');
 }
 
@@ -192,13 +264,18 @@ function openNameModal({ title, initial = '', confirmLabel = 'Create', onConfirm
   const confirmBtn = el('button', { class: 'btn-primary' }, confirmLabel);
   const cancelBtn = el('button', { class: 'btn-ghost' }, 'Cancel');
   const close = () => closeModalFocus();
-  confirmBtn.addEventListener('click', () => {
+  confirmBtn.addEventListener('click', async () => {
     const name = input.value.trim();
     if (!name) { err.textContent = 'Name required'; return; }
     const selected = colorRow.querySelector('.set-color-swatch.selected');
-    const color = selected ? selected.style.background : PALETTE[0];
+    const color = selected ? rgbToHex(selected.style.background) : PALETTE[0];
+    confirmBtn.disabled = true;
+    try {
+      await onConfirm(name, color);
+    } finally {
+      confirmBtn.disabled = false;
+    }
     close();
-    onConfirm(name, rgbToHex(color));
   });
   cancelBtn.addEventListener('click', close);
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmBtn.click(); });
@@ -230,6 +307,20 @@ function rgbToHex(color) {
   return '#' + m.slice(0, 3).map(n => parseInt(n, 10).toString(16).padStart(2, '0')).join('');
 }
 
+// ── User bar (email + sign out) ─────────────────────────────────
+function renderUserBar() {
+  const host = document.getElementById('projects-user-bar');
+  if (!host) return;
+  clear(host);
+  if (authState.local) { host.style.display = 'none'; return; }
+  host.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px;';
+  host.appendChild(el('span', { style: { fontSize: '12px', color: 'var(--text-muted)' } }, authState.user.email || ''));
+  host.appendChild(el('button', {
+    class: 'tb-btn',
+    onclick: () => signOutAndRedirect('login.html'),
+  }, 'Sign out'));
+}
+
 // ── Rendering ─────────────────────────────────────────────────
 function relativeTime(iso) {
   if (!iso) return '';
@@ -249,11 +340,11 @@ function render() {
   if (!grid) return;
   clear(grid);
 
-  let list = loadRegistry().slice().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+  let list = registryCache.slice().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
   if (filterText) list = list.filter(p => (p.name || '').toLowerCase().includes(filterText));
 
   if (!list.length) {
-    grid.appendChild(el('div', { class: 'projects-empty' }, `No projects matching "${filterText}"`));
+    grid.appendChild(el('div', { class: 'projects-empty' }, filterText ? `No projects matching "${filterText}"` : 'No projects yet — create your first one below.'));
   } else {
     for (const p of list) {
       const stats = projectStats(p.id);
@@ -288,7 +379,7 @@ function render() {
     class: 'project-card project-card-new',
     onclick: () => openNameModal({
       title: 'New project', confirmLabel: 'Create',
-      onConfirm: (name, color) => openProject(createProject(name, color)),
+      onConfirm: async (name, color) => openProject(await createProject(name, color)),
     }),
   }, [
     el('div', { class: 'project-card-new-icon' }, '+'),
@@ -307,5 +398,13 @@ function bindToolbar() {
   });
 }
 
-bindToolbar();
-render();
+async function init() {
+  authState = await requireAuth('login.html');
+  if (!authState) return; // requireAuth already redirected to login.html
+  supabase = authState.local ? null : await getSupabaseClient();
+  renderUserBar();
+  bindToolbar();
+  await refresh();
+}
+
+init();
