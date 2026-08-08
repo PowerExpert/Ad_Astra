@@ -8,7 +8,7 @@ export const SUPABASE_CONFIG = {
 export const AI_CONFIG = {
   // Your Google AI Studio key (aistudio.google.com/app/apikey)
   // Works with both old AIza... keys and new AQ... keys.
-  apiKey: 'AQ.Ab8RN6L_ZH8La_dZg7hjnkfwJALN486GewgHYQuGsJ50zgiNoQ',
+  apiKey: 'AQ.Ab8RN6JPvJBlTtQaQ5I0W6PdjjFEbRxyP1yLCONOMJuGE7l69Q',
 
   // Native Gemini REST endpoint — more reliable than the OpenAI-compatible
   // path, especially for new AQ. prefix keys. The model name is appended
